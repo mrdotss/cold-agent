@@ -13,7 +13,3 @@ agent/.venv
 .env.*
 !.env.example
 **/.env
-
-
-# Local ops notes (not for the public repo)
-agent/CHANGE_MODEL_AND_PROMPT.md

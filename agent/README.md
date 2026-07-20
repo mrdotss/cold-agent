@@ -137,15 +137,112 @@ SSE events: `{"type":"delta","text":...}`, `{"type":"report_file","key":...}`,
 `role_arn`/`external_id` are needed for billing queries and are treated as secrets.
 
 ## Changing the model or system prompt
-- **Another Bedrock model** (incl. GPT-OSS on Bedrock): change the `MODEL_ID` env
-  and re-apply with `update-agent-runtime` — **no image rebuild**.
-- **System prompt**: edit `cloud_bill_analyst/system_prompt.py`, then **rebuild**
-  (CodeBuild) and `update-agent-runtime`.
-- **Non-Bedrock provider** (OpenAI/Anthropic API): change `build_model()` in
-  `agent.py` and `requirements.txt`, then rebuild.
 
-`update-agent-runtime` is a full-config call; `deploy/runtime-update.json` is a
-ready template (edit the full `environmentVariables` map — it is replaced wholesale).
+### TL;DR — do I rebuild the image?
+
+| What you change | Edit | Rebuild image? | How to apply |
+|---|---|:--:|---|
+| Model → another **Bedrock** model (Claude, Nova, **GPT-OSS on Bedrock**, …) | `MODEL_ID` env | **No** | `update-agent-runtime` |
+| Temperature / max tokens | `MODEL_TEMPERATURE` / `MODEL_MAX_TOKENS` env | **No** | `update-agent-runtime` |
+| FX channel | `FX_FETCH_MODE` env (`http`/`browser`) | **No** | `update-agent-runtime` |
+| **System prompt** | `cloud_bill_analyst/system_prompt.py` | **Yes** | rebuild → `update-agent-runtime` |
+| Model → **non-Bedrock** API (real OpenAI/Anthropic) | `cloud_bill_analyst/agent.py` `build_model()` + `requirements.txt` | **Yes** | rebuild → `update-agent-runtime` |
+
+**Why:** `MODEL_ID`, temperature, etc. are read from **environment variables** at
+startup (`config.py`), so changing them is just a runtime update — the image is
+untouched. The **system prompt** is a Python constant baked into the image
+(`system_prompt.py`), so changing it requires a rebuild.
+
+`update-agent-runtime` is a **full-config** call — it creates a new runtime version
+and rolls the endpoint onto it (other runtimes are unaffected). Use the ready
+template **`deploy/runtime-update.json`**. ⚠️ `environmentVariables` are replaced
+**wholesale** — edit the full map in that file, never just one key.
+
+### A) Swap the model, Bedrock → Bedrock (e.g. Kimi → Claude / GPT-OSS) — no rebuild
+1. **Confirm the new model supports Converse tool-use + streaming** (the agent needs both):
+   ```bash
+   aws bedrock get-foundation-model --model-identifier <NEW_MODEL_ID> --region <REGION>
+   ```
+   (want `responseStreamingSupported: true`). To also confirm tool-use, run the
+   existing spike against it (it exercises tool-use + streaming):
+   ```bash
+   MODEL_ID=<NEW_MODEL_ID> python spike/spike_kimi.py
+   ```
+   All checks should pass before you deploy.
+2. Edit **`deploy/runtime-update.json`** → set `environmentVariables.MODEL_ID` to
+   `<NEW_MODEL_ID>` (keep the rest of the env map intact).
+3. Apply (zero-downtime, new version):
+   ```bash
+   aws bedrock-agentcore-control update-agent-runtime --cli-input-json file://deploy/runtime-update.json --region <REGION>
+   ```
+4. Verify (`status: READY`, `environmentVariables.MODEL_ID` = new id):
+   ```bash
+   aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id <RUNTIME_ID> --region <REGION>
+   ```
+5. Smoke-test the live runtime:
+   ```bash
+   python spike/_e2e_runtime.py --role-arn <ROLE_ARN> --external-id <EXTERNAL_ID>
+   ```
+
+**No IAM change needed** — the execution role already allows `bedrock:InvokeModel*`
+on `foundation-model/*`. **"GPT" note:** GPT-OSS *on Bedrock* (`openai.gpt-oss-*`)
+uses this path; the *real* OpenAI API (not Bedrock) is path **C**.
+
+### B) Change the system prompt — rebuild required
+1. Edit **`cloud_bill_analyst/system_prompt.py`** (`SYSTEM_PROMPT`).
+2. Test locally:
+   ```bash
+   python -m pytest tests -q
+   python spike/_run_golden.py <ROLE_ARN> <EXTERNAL_ID>
+   ```
+3. Commit + push to `main` (CodeBuild builds from your Git repo):
+   ```bash
+   git add cloud_bill_analyst/system_prompt.py
+   git commit -m "update system prompt"
+   git push origin main
+   ```
+4. Rebuild the ARM64 image and wait for `SUCCEEDED`:
+   ```bash
+   aws codebuild start-build --project-name cloud-bill-analyst-build --region <REGION>
+   aws codebuild batch-get-builds --ids <BUILD_ID> --region <REGION>
+   ```
+5. Roll the runtime onto the fresh image (`:latest` now points to the new build;
+   the update creates a new version that re-pulls it):
+   ```bash
+   aws bedrock-agentcore-control update-agent-runtime --cli-input-json file://deploy/runtime-update.json --region <REGION>
+   ```
+6. Verify + smoke-test (as in A-4 / A-5).
+
+> Tip: if you'll tweak the prompt often, the app can be changed to read
+> `SYSTEM_PROMPT` from an env var or an S3 object — that turns prompt edits into an
+> env-only `update-agent-runtime` (no rebuild).
+
+### C) Swap to a non-Bedrock provider (real OpenAI / Anthropic API) — rebuild required
+Only needed for providers **outside** Bedrock. Bedrock-hosted GPT/Claude use path A.
+1. In `cloud_bill_analyst/agent.py`, change `build_model()` from `BedrockModel` to
+   the matching Strands provider, e.g.:
+   ```python
+   from strands.models.openai import OpenAIModel
+   def build_model(config):
+       return OpenAIModel(
+           model_id=config.model_id,
+           params={"temperature": config.temperature, "max_tokens": config.max_tokens},
+       )
+   ```
+2. Add the provider extra to `requirements.txt` (e.g. `strands-agents[openai]`).
+3. Provide the API key **without baking it into the image**: store it in AWS Secrets
+   Manager (grant the runtime role `secretsmanager:GetSecretValue`) or pass it as an
+   env var, and read it in `build_model()`. Never commit keys.
+4. Commit/push → rebuild (CodeBuild) → `update-agent-runtime` (as in B 3–6).
+
+### Rollback
+- **Runtime:** re-run `update-agent-runtime` pointing `containerUri` at the previous
+  image **digest**, or pick a prior version in the console **Versions** tab.
+- **Find the previous image:** `aws ecr describe-images --repository-name cloud-bill-analyst --region <REGION>`
+- **Prompt/model tweaks** are just another `update-agent-runtime`, so rollback = apply the old value again.
+
+> Deployment-specific IDs (runtime id, model id, CodeBuild project) for your own
+> environment live in your local `.env` (git-ignored).
 
 ## Customer onboarding (cross-account, read-only)
 Each connected account creates a role the runtime assumes:
