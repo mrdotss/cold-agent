@@ -3,8 +3,13 @@
 Streaming contract (SSE): the entrypoint is an async generator, so the AgentCore
 runtime serves each yielded object as `data: <json>\\n\\n`. Event shapes:
   {"type": "delta", "text": "<incremental assistant text>"}
+  {"type": "tool", "phase": "start", "id","name","label","status"}  # activity step begins
+  {"type": "tool", "phase": "end", "id","name"}                     # activity step finished
+  {"type": "report_file", "key": "<s3 key>", "bucket": "<bucket>"}  # a report was saved
   {"type": "error", "message": "<message>"}
   {"type": "done"}
+The `tool` events power the web UI's live "activity"/step timeline; `status`
+carries a friendly, variative phrase for the current step (no user data/secrets).
 All outgoing text is passed through the RuntimeContext non-disclosure guard so
 role_arn / external_id can never leak, even accidentally.
 
@@ -21,6 +26,7 @@ import logging
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
 from .agent import build_agent, build_tools, extract_text_delta
+from .activity import ActivityTracker
 from .config import Config
 from .memory import maybe_build_session_manager
 from .reporting import strip_report_markers
@@ -62,8 +68,12 @@ async def invoke(payload, context):
         yield {"type": "error", "message": rc.redact(f"agent initialization failed: {e}")}
         return
 
+    tracker = ActivityTracker()
     try:
         async for event in agent.stream_async(prompt):
+            # Live activity (tool start/end) -> the UI renders a step timeline.
+            for tev in tracker.events(event):
+                yield tev
             delta = extract_text_delta(event)
             if delta:
                 # Non-disclosure guard + strip any model-emitted report markers
@@ -71,6 +81,9 @@ async def invoke(payload, context):
                 clean = rc.redact(strip_report_markers(delta))
                 if clean:
                     yield {"type": "delta", "text": clean}
+        # Close out any activity steps that never reported a result.
+        for tev in tracker.close():
+            yield tev
         # Authoritative [REPORT_FILE] markers: exactly one per uploaded key.
         seen = set()
         for entry in report_registry:

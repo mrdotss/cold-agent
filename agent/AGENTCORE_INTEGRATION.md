@@ -68,9 +68,17 @@ With `accept: text/event-stream` the body is a stream of `data: <json>\n\n` line
 | Event | Handling |
 |---|---|
 | `{"type":"delta","text":"…"}` | append `text` in order (the streamed answer) |
-| `{"type":"report_file","key":"…","bucket":"…"}` | a report was saved — mint a presigned URL for `key` |
+| `{"type":"tool","phase":"start","id","name","label","status"}` | a step began — add it to the live **activity timeline**; show `status` (a friendly, variative phrase) with a spinner, `label` as a small badge |
+| `{"type":"tool","phase":"end","id","name"}` | that step (match by `id`) finished — mark it complete |
+| `{"type":"report_file","key":"…","bucket":"…"}` | a report was saved — mint a presigned URL for `key`, then render a **download card** (only once the URL is ready) |
 | `{"type":"error","message":"…"}` | handled/redacted error — surface to the user |
 | `{"type":"done"}` | end of the turn |
+
+**Activity/tool events** power the live "what the agent is doing" timeline. Tool
+`name`s you'll see: `get_cost_and_usage` (Cost Explorer), `get_exchange_rate`
+(FX), `create_chart`, `create_report`. `start`/`end` pair by `id`; `status` is a
+human phrase that varies per step (e.g. "Querying AWS Cost Explorer…"). Unknown
+future event types should be ignored gracefully.
 
 `[REPORT_FILE: <key>]` is also appended to the assistant text (authoritative,
 exactly once per file) — but prefer the structured `report_file` event in code.
@@ -164,9 +172,10 @@ async function ask(prompt: string, sessionId: string, actorId: string) {
       if (!line.startsWith("data:")) continue;
       const ev = JSON.parse(line.slice(5).trim());
       if (ev.type === "delta") appendToUI(ev.text);
+      else if (ev.type === "tool") updateActivity(ev);   // phase start/end -> step timeline
       else if (ev.type === "report_file") {
         const { url } = await (await fetch(`/api/report-url?key=${encodeURIComponent(ev.key)}`)).json();
-        showDownload(url);
+        showDownload(url);                                // render the download card once the URL is ready
       } else if (ev.type === "error") showError(ev.message);
       // ev.type === "done" -> finished
     }
