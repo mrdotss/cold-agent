@@ -6,3 +6,10 @@ Thumbs.db
 agent/.venv
 **/.pytest_cache/
 **/__pycache__/
+
+
+# Env / local secrets - never commit
+.env
+.env.*
+!.env.example
+**/.env
