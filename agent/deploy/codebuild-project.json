@@ -1,0 +1,24 @@
+{
+  "name": "cloud-bill-analyst-build",
+  "description": "Build ARM64 Cloud Bill Analyst runtime image and push to ECR",
+  "source": {
+    "type": "GITHUB",
+    "location": "https://github.com/mrdotss/cold-agent.git",
+    "buildspec": "agent/buildspec.yml",
+    "gitCloneDepth": 1,
+    "reportBuildStatus": false
+  },
+  "sourceVersion": "main",
+  "artifacts": { "type": "NO_ARTIFACTS" },
+  "environment": {
+    "type": "ARM_CONTAINER",
+    "image": "aws/codebuild/amazonlinux2-aarch64-standard:3.0",
+    "computeType": "BUILD_GENERAL1_LARGE",
+    "privilegedMode": true
+  },
+  "serviceRole": "arn:aws:iam::279199663312:role/CloudBillAnalystCodeBuildRole",
+  "logsConfig": {
+    "cloudWatchLogs": { "status": "ENABLED", "groupName": "/aws/codebuild/cloud-bill-analyst-build" }
+  },
+  "timeoutInMinutes": 40
+}

@@ -1,0 +1,42 @@
+version: 0.2
+# Cloud Bill Analyst - build the ARM64 runtime image and push to private ECR.
+# Run on an ARM_CONTAINER CodeBuild environment (privileged) so `docker build`
+# produces linux/arm64 natively. The Dockerfile's runtime stage runs
+# `python skills/demo.py` at build time = the skill smoke-test stage.
+env:
+  variables:
+    IMAGE_REPO_NAME: cloud-bill-analyst
+    IMAGE_TAG: latest
+phases:
+  pre_build:
+    commands:
+      - set -e
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+      - IMAGE_URI=${REGISTRY}/${IMAGE_REPO_NAME}
+      - GIT_SHA=$(echo ${CODEBUILD_RESOLVED_SOURCE_VERSION:-manual} | cut -c1-12)
+      - echo "Logging in to ECR ${REGISTRY}"
+      - aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${REGISTRY}
+      # Repo root is cold-agent; app lives under agent/. Support both layouts.
+      - if [ -d "$CODEBUILD_SRC_DIR/agent" ]; then CTX="$CODEBUILD_SRC_DIR/agent"; else CTX="$CODEBUILD_SRC_DIR"; fi
+      - echo "Build context = ${CTX}"
+  build:
+    commands:
+      - echo "Building ARM64 image (skill smoke test runs during the build)"
+      - docker build --platform linux/arm64 -t ${IMAGE_URI}:${IMAGE_TAG} -t ${IMAGE_URI}:${GIT_SHA} "$CTX"
+  post_build:
+    commands:
+      - echo "Boot smoke test (/ping)"
+      - docker run -d --rm -e CBA_DISABLE_MEMORY=1 -p 8080:8080 --name cba_smoke ${IMAGE_URI}:${IMAGE_TAG}
+      - sleep 8
+      - curl -fsS http://127.0.0.1:8080/ping && echo " ping-ok"
+      - docker stop cba_smoke
+      - echo "Pushing image tags"
+      - docker push ${IMAGE_URI}:${IMAGE_TAG}
+      - docker push ${IMAGE_URI}:${GIT_SHA}
+      - printf '{"imageUri":"%s"}' "${IMAGE_URI}:${GIT_SHA}" > imageDetail.json
+      - echo "Pushed ${IMAGE_URI}:${IMAGE_TAG} (${GIT_SHA})"
+artifacts:
+  files:
+    - imageDetail.json
+  base-directory: agent
