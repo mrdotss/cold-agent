@@ -1,0 +1,8 @@
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Agent libary
+agent/.venv
+**/.pytest_cache/
+**/__pycache__/
