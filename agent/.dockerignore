@@ -1,0 +1,14 @@
+.venv/
+**/__pycache__/
+**/*.pyc
+.git/
+.gitignore
+spike/
+tests/
+*.md
+!skills/**/SKILL.md
+.kiro/
+.pytest_cache/
+requirements-dev.txt
+*.log
+.DS_Store

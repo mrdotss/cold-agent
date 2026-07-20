@@ -1,0 +1,7 @@
+# Cloud Bill Analyst runtime dependencies (pinned to versions validated locally
+# and baked into the ARM64 container image).
+strands-agents==1.48.0
+strands-agents-tools==0.8.4
+bedrock-agentcore==1.18.1
+boto3==1.43.51
+botocore==1.43.51
