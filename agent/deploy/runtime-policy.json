@@ -1,0 +1,126 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockModelInvocation",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/*",
+        "arn:aws:bedrock:us-east-1:279199663312:inference-profile/*"
+      ]
+    },
+    {
+      "Sid": "EcrAuthToken",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcrPrivatePull",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+      ],
+      "Resource": "arn:aws:ecr:us-east-1:279199663312:repository/cloud-bill-analyst"
+    },
+    {
+      "Sid": "XRayTracingAccess",
+      "Effect": "Allow",
+      "Action": ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams", "logs:DescribeLogGroups"],
+      "Resource": "arn:aws:logs:us-east-1:279199663312:log-group:/aws/bedrock-agentcore/runtimes/*"
+    },
+    {
+      "Sid": "CloudWatchMetricsPublish",
+      "Effect": "Allow",
+      "Action": "cloudwatch:PutMetricData",
+      "Resource": "*",
+      "Condition": { "StringEquals": { "cloudwatch:namespace": "bedrock-agentcore" } }
+    },
+    {
+      "Sid": "AgentCoreWorkloadIdentity",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:GetWorkloadAccessToken",
+        "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+        "bedrock-agentcore:GetWorkloadAccessTokenForUserId"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:us-east-1:279199663312:workload-identity-directory/default",
+        "arn:aws:bedrock-agentcore:us-east-1:279199663312:workload-identity-directory/default/workload-identity/cloud_bill_analyst-*"
+      ]
+    },
+    {
+      "Sid": "AgentCoreBrowserTool",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:StartBrowserSession",
+        "bedrock-agentcore:StopBrowserSession",
+        "bedrock-agentcore:GetBrowserSession",
+        "bedrock-agentcore:ListBrowserSessions",
+        "bedrock-agentcore:UpdateBrowserStream",
+        "bedrock-agentcore:ConnectBrowserAutomationStream",
+        "bedrock-agentcore:ConnectBrowserLiveViewStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:us-east-1:aws:browser/*",
+        "arn:aws:bedrock-agentcore:us-east-1:279199663312:browser/*",
+        "arn:aws:bedrock-agentcore:us-east-1:279199663312:browser-custom/*"
+      ]
+    },
+    {
+      "Sid": "AgentCoreCodeInterpreterTool",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:StartCodeInterpreterSession",
+        "bedrock-agentcore:StopCodeInterpreterSession",
+        "bedrock-agentcore:GetCodeInterpreterSession",
+        "bedrock-agentcore:ListCodeInterpreterSessions",
+        "bedrock-agentcore:InvokeCodeInterpreter"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:us-east-1:aws:code-interpreter/*",
+        "arn:aws:bedrock-agentcore:us-east-1:279199663312:code-interpreter/*",
+        "arn:aws:bedrock-agentcore:us-east-1:279199663312:code-interpreter-custom/*"
+      ]
+    },
+    {
+      "Sid": "AgentCoreMemoryAccess",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateEvent",
+        "bedrock-agentcore:GetEvent",
+        "bedrock-agentcore:ListEvents",
+        "bedrock-agentcore:ListActors",
+        "bedrock-agentcore:ListSessions",
+        "bedrock-agentcore:GetMemoryRecord",
+        "bedrock-agentcore:ListMemoryRecords",
+        "bedrock-agentcore:RetrieveMemoryRecords"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:us-east-1:279199663312:memory/MRMemory-AgcOp32p44",
+        "arn:aws:bedrock-agentcore:us-east-1:279199663312:memory/MRMemory-AgcOp32p44/*"
+      ]
+    },
+    {
+      "Sid": "CrossAccountCostAssume",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReportsReadWrite",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": "arn:aws:s3:::mr-harness/cloud-bill-analyst/reports/*"
+    }
+  ]
+}
