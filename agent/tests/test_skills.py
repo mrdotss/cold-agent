@@ -2,6 +2,7 @@
 import base64
 import importlib.util
 import os
+import zipfile
 
 from openpyxl import load_workbook
 from pypdf import PdfReader
@@ -46,12 +47,17 @@ def test_xlsx_build_and_roundtrip(tmp_path):
     path = bx.build_xlsx(_spec(out, [str(chart)]))
     assert os.path.isfile(path)
     wb = load_workbook(path)
-    ws = wb["Cost Report"]
-    assert ws["A1"].value == "AWS Cost Report"
-    assert "Charts" in wb.sheetnames  # chart embedded
-    # a numeric cost cell in column B
-    vals = [ws.cell(row=r, column=2).value for r in range(6, 10)]
+    assert "Overview" in wb.sheetnames and "Details" in wb.sheetnames
+    ov, det = wb["Overview"], wb["Details"]
+    # title lives on the Overview sheet
+    assert any(str(c.value or "").strip() == "AWS Cost Report"
+               for row in ov.iter_rows() for c in row)
+    # a positive numeric cost cell in the Details table (column B)
+    vals = [det.cell(row=r, column=2).value for r in range(2, 8)]
     assert any(isinstance(v, (int, float)) and v > 0 for v in vals)
+    # the supplied chart image is embedded (full-width) on the Overview
+    with zipfile.ZipFile(path) as z:
+        assert any(n.startswith("xl/media/image") for n in z.namelist())
 
 
 def test_pdf_build_valid(tmp_path):
@@ -72,6 +78,13 @@ def test_xlsx_usd_only_no_display_column(tmp_path):
     spec["currency"] = {"display": "USD"}
     path = bx.build_xlsx(spec)
     wb = load_workbook(path)
-    ws = wb["Cost Report"]
-    assert ws["A5"].value == "Service" and ws["B5"].value == "Amount (USD)"
-    assert ws["C5"].value is None  # no display-currency column when display==USD
+    det = wb["Details"]
+    header = [det.cell(row=1, column=c).value for c in range(1, 5)]
+    assert header[0] == "Service" and header[1] == "Amount (USD)"
+    assert header[2] == "Share"        # Share directly after USD - no display column
+    assert header[3] is None
+    # no display-currency column anywhere in the header
+    assert not any(str(h or "").startswith("Amount (") and "USD" not in str(h) for h in header)
+    # no PNGs supplied -> two native (editable) charts are generated as a fallback
+    with zipfile.ZipFile(path) as z:
+        assert sum(n.startswith("xl/charts/chart") for n in z.namelist()) >= 2

@@ -61,12 +61,18 @@ def main():
     # xlsx round-trip
     from openpyxl import load_workbook
     wb = load_workbook(x)
-    ws = wb["Cost Report"]
-    assert ws["A1"].value == "AWS Cost Report", ws["A1"].value
-    # find a numeric cost cell
-    found = any(isinstance(ws.cell(row=r, column=2).value, (int, float))
-                for r in range(6, 12))
+    assert "Overview" in wb.sheetnames and "Details" in wb.sheetnames, wb.sheetnames
+    ov, det = wb["Overview"], wb["Details"]
+    assert any(str(c.value or "").strip() == "AWS Cost Report"
+               for row in ov.iter_rows() for c in row), "title missing on Overview"
+    # a numeric cost cell in the Details table (column B)
+    found = any(isinstance(det.cell(row=r, column=2).value, (int, float))
+                for r in range(2, 14))
     assert found, "no numeric cost cells found on round-trip"
+    # native charts were embedded
+    import zipfile
+    with zipfile.ZipFile(x) as z:
+        assert sum(n.startswith("xl/charts/chart") for n in z.namelist()) >= 2, "no native charts"
 
     # pdf sanity
     with open(p, "rb") as f:

@@ -1,3 +1,9 @@
 # Dev/test-only dependencies (not shipped in the runtime image).
 -r requirements.txt
+-r requirements-skills.txt
 pytest==9.1.1
+
+# Local-only: lets tests/spikes render charts through the *production* chart code.
+# In production, charts render in the managed Code Interpreter (its own matplotlib),
+# so matplotlib is intentionally NOT in requirements.txt / requirements-skills.txt.
+matplotlib==3.11.1

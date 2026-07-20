@@ -1,11 +1,22 @@
 # Skill: minimax-xlsx
 
-Builds a formatted `.xlsx` AWS cost report in-container (no network).
+Builds a high-end `.xlsx` AWS cost report in-container (no network).
 
-- Engine: openpyxl (+ pandas/lxml available in the image).
+Workbook:
+- **Overview** - title, a 4-up KPI card band, a derived **Key insights** panel and
+  two NATIVE (editable) Excel charts: a doughnut of cost composition and a bar of
+  cost by service, both driven by the Details table. Gridlines hidden.
+- **Details** - the line-item table with a computed *Share* column, in-cell data
+  bars on the USD column, a frozen header and an auto-filter.
+
+Every figure and insight is derived from the spec rows - nothing is invented.
+
+- Engine: openpyxl (native charts + conditional-format data bars).
+- Palette / formatting / insight computation: shared `skills/report_common.py`.
 - Invocation: `python skills/minimax_xlsx/build_xlsx.py --spec <spec.json>`
   - Writes `spec.output_path`, prints the absolute path to stdout (exit 0).
-- Charts: any PNG paths in `spec.charts` are embedded on a "Charts" sheet.
+- Charts: native Excel charts are generated from the data; PNG paths in
+  `spec.charts` are not required (the PDF skill embeds those).
 
 Spec JSON (output_path + rows required):
 ```json
@@ -22,5 +33,5 @@ Spec JSON (output_path + rows required):
 }
 ```
 
-Note: this is a functional in-container equivalent of the "minimax-xlsx" skill,
-using the plan's specified toolchain and file-build contract.
+Note: functional in-container equivalent of the "minimax-xlsx" skill, using the
+plan's specified toolchain and file-build contract.
