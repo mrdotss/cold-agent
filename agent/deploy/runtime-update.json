@@ -1,0 +1,30 @@
+{
+  "agentRuntimeId": "cloud_bill_analyst-Dn7a652NZj",
+  "agentRuntimeArtifact": {
+    "containerConfiguration": {
+      "containerUri": "279199663312.dkr.ecr.us-east-1.amazonaws.com/cloud-bill-analyst:latest"
+    }
+  },
+  "roleArn": "arn:aws:iam::279199663312:role/CloudBillAnalystRuntimeRole",
+  "networkConfiguration": { "networkMode": "PUBLIC" },
+  "protocolConfiguration": { "serverProtocol": "HTTP" },
+  "lifecycleConfiguration": {
+    "idleRuntimeSessionTimeout": 900,
+    "maxLifetime": 28800
+  },
+  "metadataConfiguration": { "requireMMDSV2": true },
+  "environmentVariables": {
+    "AWS_MEMORY_ARN": "arn:aws:bedrock-agentcore:us-east-1:279199663312:memory/MRMemory-AgcOp32p44",
+    "AWS_REGION": "us-east-1",
+    "AWS_STAGE": "prod",
+    "AWS_TRUNCATION_MESSAGES_COUNT": "150",
+    "AWS_TRUNCATION_STRATEGY": "sliding_window",
+    "MODEL_ID": "moonshotai.kimi-k2.5",
+    "REPORT_BUCKET": "mr-harness",
+    "REPORT_PREFIX": "cloud-bill-analyst/reports/",
+    "DEFAULT_DISPLAY_CURRENCY": "IDR",
+    "DEFAULT_TIMEZONE": "Asia/Jakarta",
+    "CBA_PREF_STRATEGY_ID": "CloudBillAnalystUserPreferences-ofYTKQ4wec",
+    "CBA_PREF_NAMESPACE": "cba/preferences/{actorId}"
+  }
+}
