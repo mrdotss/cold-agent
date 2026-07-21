@@ -1,0 +1,18 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`AnomalyBadges > matches a stable structural snapshot for the three kinds 1`] = `
+[
+  {
+    "accent": "rose",
+    "text": "Amazon EC2Spike",
+  },
+  {
+    "accent": "amber",
+    "text": "Amazon S3New service",
+  },
+  {
+    "accent": "amber",
+    "text": "AWS LambdaLarge MoM delta",
+  },
+]
+`;

@@ -13,3 +13,4 @@ agent/.venv
 .env.*
 !.env.example
 **/.env
+references/

@@ -1,0 +1,15 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`AnomalyCallout > matches a stable structural snapshot for the three kinds 1`] = `
+[
+  {
+    "label": "rose",
+  },
+  {
+    "label": "amber",
+  },
+  {
+    "label": "amber",
+  },
+]
+`;
