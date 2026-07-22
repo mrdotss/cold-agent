@@ -28,6 +28,7 @@ from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from .agent import build_agent, build_tools, extract_text_delta
 from .activity import ActivityTracker
 from .config import Config
+from .history import sanitize_messages
 from .memory import maybe_build_session_manager
 from .reporting import strip_report_markers
 from .runtime_context import install_log_redaction, parse_runtime_context
@@ -67,6 +68,21 @@ async def invoke(payload, context):
         log.exception("agent initialization failed")
         yield {"type": "error", "message": rc.redact(f"agent initialization failed: {e}")}
         return
+
+    # Defense-in-depth: repair any restored conversation history so tool-use /
+    # tool-result blocks are validly paired before Bedrock Converse sees them.
+    # AgentCore Memory can restore orphaned toolResult / dangling toolUse blocks
+    # (e.g. after a duplicate/interrupted turn on the same session), which would
+    # otherwise fail ConverseStream with a ValidationException.
+    try:
+        restored = getattr(agent, "messages", None)
+        if isinstance(restored, list) and restored:
+            repaired = sanitize_messages(restored)
+            if repaired != restored:
+                log.info("history sanitize: %d -> %d messages", len(restored), len(repaired))
+                agent.messages[:] = repaired
+    except Exception:  # noqa: BLE001
+        log.exception("history sanitize failed; continuing with restored history")
 
     tracker = ActivityTracker()
     try:
