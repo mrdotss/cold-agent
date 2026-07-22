@@ -14,7 +14,10 @@ ARG PYTHON_VERSION=3.12
 # =========================================================================
 # Task 6 - base runtime: serves /invocations + /ping on :8080 (text-only path)
 # =========================================================================
-FROM python:${PYTHON_VERSION}-slim-bookworm AS appbase
+# NOTE: base image pulled from the ECR Public mirror (public.ecr.aws) instead of
+# Docker Hub to avoid Docker Hub's aggressive anonymous pull rate limit (HTTP 429),
+# which intermittently failed CodeBuild at the FROM step.
+FROM public.ecr.aws/docker/library/python:${PYTHON_VERSION}-slim-bookworm AS appbase
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
