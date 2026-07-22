@@ -76,12 +76,14 @@ def extract_text_delta(event: Any) -> Optional[str]:
 
 
 
-def build_tools(config: Config, context: RuntimeContext, *, report_registry=None) -> list:
+def build_tools(config: Config, context: RuntimeContext, *, report_registry=None,
+                chart_registry=None) -> list:
     """Assemble all agent tools bound to this invocation's RuntimeContext.
 
-    Secrets (role_arn/external_id) stay captured in each tool's closure; report
+    Secrets (role_arn/external_id) stay captured in each tool's closure. Report
     uploads append to report_registry so the app can emit authoritative
-    [REPORT_FILE] markers.
+    [REPORT_FILE] markers; created charts append their client-render spec to
+    chart_registry so the app can emit inline `chart` events.
     """
     from .reporting import make_report_tool
     from .tools.charts import make_chart_tool
@@ -91,6 +93,6 @@ def build_tools(config: Config, context: RuntimeContext, *, report_registry=None
     return [
         make_cost_tool(context, config),
         make_fx_tool(context, config),
-        make_chart_tool(context, config),
+        make_chart_tool(context, config, registry=chart_registry),
         make_report_tool(context, config, registry=report_registry),
     ]

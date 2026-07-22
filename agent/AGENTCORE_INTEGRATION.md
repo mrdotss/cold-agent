@@ -70,6 +70,7 @@ With `accept: text/event-stream` the body is a stream of `data: <json>\n\n` line
 | `{"type":"delta","text":"…"}` | append `text` in order (the streamed answer) |
 | `{"type":"tool","phase":"start","id","name","label","status"}` | a step began — add it to the live **activity timeline**; show `status` (a friendly, variative phrase) with a spinner, `label` as a small badge |
 | `{"type":"tool","phase":"end","id","name"}` | that step (match by `id`) finished — mark it complete |
+| `{"type":"chart","spec":{…}}` | a chart was produced — render it **inline, client-side** from the `spec` data (no image, no presign) |
 | `{"type":"report_file","key":"…","bucket":"…"}` | a report was saved — mint a presigned URL for `key`, then render a **download card** (only once the URL is ready) |
 | `{"type":"error","message":"…"}` | handled/redacted error — surface to the user |
 | `{"type":"done"}` | end of the turn |
@@ -79,6 +80,13 @@ With `accept: text/event-stream` the body is a stream of `data: <json>\n\n` line
 (FX), `create_chart`, `create_report`. `start`/`end` pair by `id`; `status` is a
 human phrase that varies per step (e.g. "Querying AWS Cost Explorer…"). Unknown
 future event types should be ignored gracefully.
+
+**Chart events** carry the chart's **structured data**, not an image:
+`{"type":"chart","spec":{"id","chart_type":"bar|hbar|line|pie","title","currency","labels":[…],"values":[…]}}`.
+Render it **inline in the browser** with a charting library (e.g. Recharts / shadcn
+Charts) themed to your app — interactive, no S3, no presign. (The runtime still
+renders matplotlib PNGs server-side, but only to embed static charts into PDF/XLSX
+reports.)
 
 `[REPORT_FILE: <key>]` is also appended to the assistant text (authoritative,
 exactly once per file) — but prefer the structured `report_file` event in code.

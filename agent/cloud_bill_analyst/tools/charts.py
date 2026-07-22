@@ -228,7 +228,8 @@ def run_chart(context: RuntimeContext, config: Config, spec: dict,
 
 
 def make_chart_tool(context: RuntimeContext, config: Config,
-                    executor: Optional[Callable[[str], str]] = None) -> Callable:
+                    executor: Optional[Callable[[str], str]] = None,
+                    registry: Optional[list] = None) -> Callable:
     from strands import tool
 
     @tool
@@ -260,15 +261,32 @@ def make_chart_tool(context: RuntimeContext, config: Config,
         The returned path is a container file to hand to the report tool - do not
         paste image bytes into your reply.
         """
+        ctype = (chart_type or "bar").lower()
         spec = {
             "title": title,
             "labels": labels,
             "values": values,
-            "chart_type": (chart_type or "bar").lower(),
+            "chart_type": ctype,
             "currency": currency or "",
             "x_label": x_label,
             "y_label": y_label,
         }
+        # Register a client-render spec so the web UI can draw this chart INLINE
+        # (interactive, themed) from data - independent of the PNG render, which is
+        # only needed to embed static charts into PDF/XLSX reports.
+        if registry is not None:
+            try:
+                if labels and values and len(labels) == len(values) and ctype in VALID_CHART_TYPES:
+                    registry.append({
+                        "id": uuid.uuid4().hex[:12],
+                        "chart_type": ctype,
+                        "title": title,
+                        "currency": currency or "",
+                        "labels": [str(x) for x in labels],
+                        "values": [float(x) for x in values],
+                    })
+            except Exception:  # noqa: BLE001
+                log.warning("could not register inline chart spec", exc_info=True)
         return run_chart(context, config, spec, executor=executor)
 
     return create_chart

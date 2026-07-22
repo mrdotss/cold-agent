@@ -5,6 +5,7 @@ runtime serves each yielded object as `data: <json>\\n\\n`. Event shapes:
   {"type": "delta", "text": "<incremental assistant text>"}
   {"type": "tool", "phase": "start", "id","name","label","status"}  # activity step begins
   {"type": "tool", "phase": "end", "id","name"}                     # activity step finished
+  {"type": "chart", "spec": {...}}                                  # inline chart data (client-rendered)
   {"type": "report_file", "key": "<s3 key>", "bucket": "<bucket>"}  # a report was saved
   {"type": "error", "message": "<message>"}
   {"type": "done"}
@@ -60,9 +61,10 @@ async def invoke(payload, context):
     log.info("invocation actor=%s session=%s context=%s", rc.actor_id, rc.session_id, rc.safe_dict())
 
     report_registry: list = []
+    chart_registry: list = []
     try:
         session_manager = maybe_build_session_manager(CONFIG, rc)
-        tools = build_tools(CONFIG, rc, report_registry=report_registry)
+        tools = build_tools(CONFIG, rc, report_registry=report_registry, chart_registry=chart_registry)
         agent = build_agent(CONFIG, rc, tools=tools, session_manager=session_manager)
     except Exception as e:  # noqa: BLE001
         log.exception("agent initialization failed")
@@ -85,11 +87,17 @@ async def invoke(payload, context):
         log.exception("history sanitize failed; continuing with restored history")
 
     tracker = ActivityTracker()
+    charts_emitted = 0
     try:
         async for event in agent.stream_async(prompt):
             # Live activity (tool start/end) -> the UI renders a step timeline.
             for tev in tracker.events(event):
                 yield tev
+            # Inline charts: emit each created chart's spec as soon as it appears
+            # so the web UI renders it live (client-side; no image/S3/presign).
+            while charts_emitted < len(chart_registry):
+                yield {"type": "chart", "spec": chart_registry[charts_emitted]}
+                charts_emitted += 1
             delta = extract_text_delta(event)
             if delta:
                 # Non-disclosure guard + strip any model-emitted report markers
@@ -100,6 +108,10 @@ async def invoke(payload, context):
         # Close out any activity steps that never reported a result.
         for tev in tracker.close():
             yield tev
+        # Drain any charts registered right at the end of the turn.
+        while charts_emitted < len(chart_registry):
+            yield {"type": "chart", "spec": chart_registry[charts_emitted]}
+            charts_emitted += 1
         # Authoritative [REPORT_FILE] markers: exactly one per uploaded key.
         seen = set()
         for entry in report_registry:
