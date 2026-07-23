@@ -91,60 +91,6 @@ export const activeAccount = pgTable("active_account", {
 });
 
 /**
- * `threads` (Req 8). Each thread pins a `connected_account_id` at creation
- * (immutable). `session_id` is the stable 33–128 char runtime session id,
- * one-to-one with the thread (UNIQUE) and never reassigned.
- */
-export const threads = pgTable("threads", {
-  id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  connectedAccountId: text("connected_account_id")
-    .notNull()
-    .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-  sessionId: text("session_id").notNull().unique(),
-  title: text("title"),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
-
-/** Message role: user turn or assistant turn. */
-export type MessageRole = "user" | "assistant";
-
-/**
- * `messages` (Req 8.5, 10). `role` is `user` | `assistant`. Displayed ordered by
- * `created_at` ascending.
- */
-export const messages = pgTable("messages", {
-  id: text("id").primaryKey(),
-  threadId: text("thread_id")
-    .notNull()
-    .references(() => threads.id, { onDelete: "cascade" }),
-  role: text("role").$type<MessageRole>().notNull(),
-  content: text("content").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
-
-/** Feedback value: thumbs up or thumbs down. */
-export type FeedbackValue = "up" | "down";
-
-/**
- * `message_feedback` (Req 14.5–14.8). At most one row per message
- * (`message_id` PK). Absence = no-feedback; setting replaces; toggling the
- * current value deletes the row.
- */
-export const messageFeedback = pgTable("message_feedback", {
-  messageId: text("message_id")
-    .primaryKey()
-    .references(() => messages.id, { onDelete: "cascade" }),
-  value: text("value").$type<FeedbackValue>().notNull(),
-});
-
-/**
  * `login_attempts` (Req 2.9). Failed attempts in the trailing 15-minute window
  * are counted; >= 5 failures locks that normalized email for 15 minutes.
  */
@@ -172,15 +118,6 @@ export type NewConnectedAccount = typeof connectedAccounts.$inferInsert;
 
 export type ActiveAccount = typeof activeAccount.$inferSelect;
 export type NewActiveAccount = typeof activeAccount.$inferInsert;
-
-export type Thread = typeof threads.$inferSelect;
-export type NewThread = typeof threads.$inferInsert;
-
-export type Message = typeof messages.$inferSelect;
-export type NewMessage = typeof messages.$inferInsert;
-
-export type MessageFeedback = typeof messageFeedback.$inferSelect;
-export type NewMessageFeedback = typeof messageFeedback.$inferInsert;
 
 export type LoginAttempt = typeof loginAttempts.$inferSelect;
 export type NewLoginAttempt = typeof loginAttempts.$inferInsert;

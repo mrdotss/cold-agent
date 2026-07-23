@@ -50,6 +50,12 @@ Map each piece to the references in `references/`:
 5. **Report download card**: on a `report_file` event, presign server-side, then
    render a card with a file-type icon (PDF/XLSX), filename, size and Download.
    **Render the card only once the presigned URL is ready** (not on the marker).
+   **Inline chart** (on a `chart` event): render the chart's structured `spec`
+   **live in the browser** with shadcn Charts (Recharts, Base UI variant) — themed
+   to the preset (violet series, serif titles, sharp corners, no gradients),
+   interactive + responsive, in a framed card captioned with `title`. No image, no
+   presign. Map `chart_type`: `bar`→bar, `hbar`→horizontal bar, `line`→line/area,
+   `pie`→donut.
 6. **Cost-anomaly flags**: when the agent flags unusual spend (spike / new service
    / large MoM delta), surface it as an inline callout (amber/rose accent) in chat
    and as a badge on the dashboard.
@@ -68,6 +74,18 @@ Map each piece to the references in `references/`:
 - **Chat disabled** until ≥1 account connected → show a connect-account CTA card.
 - Streaming, empty-thread, and error states (drive errors from the `error` event).
 - Account switcher + thread list (sidebar) for multiple accounts / conversations.
+
+## Conversations sidebar (history, titles, new)
+- **Titles**: each conversation shows its title — AI-generated from the first
+  prompt (short, ≤ ~6 words). Inline **rename** on click / ✎ (Enter saves, Esc
+  cancels); a user-set title is never overwritten by the AI. Show a subtle
+  skeleton/shimmer on a brand-new conversation while its AI title generates.
+- **New conversation**: the "New" control creates + selects the conversation and
+  it appears in the list **immediately** (optimistic insert, then revalidate) — no
+  page reload. The control returns to idle as soon as create resolves (and on
+  error, rolls back with a toast). Never leave it stuck spinning.
+- Editorial styling: conversation rows are flat with a violet active-state
+  left-border (per the preset); the selected row is quietly emphasized, not boxed.
 
 ## Motion & quality bar
 Apply `high-end-visual-design` **principles** within the preset's language:

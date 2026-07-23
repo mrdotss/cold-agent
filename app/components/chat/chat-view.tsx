@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAgentStream } from "@/hooks/useAgentStream";
 import { canRegenerate, precedingUserPrompt } from "@/lib/regenerate";
 
 import { ActivityTimeline } from "./activity-timeline";
 import { AgentIntro } from "./agent-intro";
+import { ChartInline } from "./chart-inline";
 import { Composer } from "./composer";
 import { MessageActions } from "./message-actions";
 import { MessageList } from "./message-list";
@@ -90,6 +91,38 @@ export function ChatView({
     [send],
   );
 
+  // After the FIRST assistant turn completes for a conversation that began
+  // empty, generate its AI title from the first user prompt and then signal the
+  // sidebar to refresh so "New Chat" is replaced by the summarized title
+  // (Req 10.2, 10.8). Fires at most once per mount; the title route is
+  // idempotent and falls back to a trimmed prompt if the model is unavailable,
+  // so the conversation is never left pending.
+  const startedEmpty = initialMessages.length === 0;
+  const titleFiredRef = useRef(false);
+  useEffect(() => {
+    if (!startedEmpty || titleFiredRef.current) return;
+    if (state.phase !== "done") return;
+    const firstUserPrompt =
+      history.find((message) => message.role === "user")?.content ?? "";
+    titleFiredRef.current = true;
+    void (async () => {
+      try {
+        await fetch(`/api/conversations/${encodeURIComponent(threadId)}/title`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ firstPrompt: firstUserPrompt }),
+        });
+      } catch {
+        // Best-effort: the sidebar safety-net retries a still-pending title.
+      } finally {
+        // Refresh the sidebar list so the new title lands without a reload.
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("conversations:refresh"));
+        }
+      }
+    })();
+  }, [state.phase, startedEmpty, history, threadId]);
+
   // A chip replaces the composer contents and moves focus there WITHOUT
   // submitting (Req 16.2). Focus is applied after the value update paints.
   const handlePick = useCallback((text: string) => {
@@ -108,6 +141,17 @@ export function ChatView({
         collapsed={state.collapsed}
         liveRegion={state.liveRegion}
       />
+    ) : undefined;
+
+  // Inline charts for the in-progress turn — one ChartInline per streamed
+  // ChartSpec, in received order, rendered live client-side (Req 4.1, 4.10).
+  const chartsSlot =
+    state.charts.length > 0 ? (
+      <div className="flex flex-col gap-3">
+        {state.charts.map((spec) => (
+          <ChartInline key={spec.id} spec={spec} />
+        ))}
+      </div>
     ) : undefined;
 
   // Report cards render only once their presigned URL resolves (Req 11.5); the
@@ -138,7 +182,9 @@ export function ChatView({
   const renderAssistantActions = useCallback(
     (message: ChatMessage, index: number) => (
       <MessageActions
+        conversationId={threadId}
         messageId={message.id}
+        initialFeedback={message.feedback ?? null}
         content={message.content}
         canRegenerate={canRegenerate(history, index)}
         onRegenerate={() => {
@@ -147,7 +193,7 @@ export function ChatView({
         }}
       />
     ),
-    [history, send],
+    [history, send, threadId],
   );
 
   const suggestions = useMemo(() => initialSuggestions, [initialSuggestions]);
@@ -172,6 +218,7 @@ export function ChatView({
             streamingText={state.assistantText}
             isStreaming={isStreaming}
             activitySlot={activitySlot}
+            chartsSlot={chartsSlot}
             trailingSlot={trailingSlot}
             renderAssistantActions={renderAssistantActions}
           />

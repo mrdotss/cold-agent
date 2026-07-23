@@ -19,7 +19,6 @@ import {
   type FeedbackState,
   type FeedbackValue,
 } from "@/lib/interactions";
-import { setMessageFeedback } from "@/lib/actions/feedback";
 
 /**
  * Per-assistant-turn action bar (Req 14, design-system §4, ref-6): copy ·
@@ -27,9 +26,11 @@ import { setMessageFeedback } from "@/lib/actions/feedback";
  * corners, HugeIcons line icons, violet accent for the active vote).
  *
  * Presentational + browser-only. It owns three small pieces of local UI state
- * (copy status, the optimistic feedback vote, and a transient error) and calls
- * the {@link setMessageFeedback} server action for persistence. Regeneration is
- * delegated to `onRegenerate` (the page wires it to the stream hook's
+ * (copy status, the optimistic feedback vote, and a transient error) and
+ * persists a chosen vote via the message-feedback ROUTE (`PATCH
+ * /api/conversations/[id]/messages/[messageId]/feedback`) — never Postgres and
+ * never DynamoDB directly (Req 14.2, 14.5). Regeneration is delegated to
+ * `onRegenerate` (the page wires it to the stream hook's
  * `send(precedingUserPrompt)`), and whether it is allowed is decided upstream by
  * `canRegenerate` (`lib/regenerate.ts`).
  */
@@ -44,7 +45,16 @@ const COPY_STATUS_VISIBLE_MS = 2000;
 type CopyStatus = "idle" | "copied" | "error";
 
 export interface MessageActionsProps {
-  /** The target assistant message id (owned-thread checked server-side). */
+  /**
+   * The conversation this turn belongs to — the `[id]` path segment of the
+   * feedback route (owned-thread checked server-side). Required to address the
+   * persist call.
+   */
+  conversationId: string;
+  /**
+   * The target assistant message id — the `MSG#…` sort key and the `[messageId]`
+   * path segment (URL-encoded before use; owned-thread checked server-side).
+   */
   messageId: string;
   /**
    * The assistant message's COMPLETE rendered text — copied verbatim to the
@@ -72,6 +82,7 @@ export interface MessageActionsProps {
 }
 
 export function MessageActions({
+  conversationId,
   messageId,
   content,
   canRegenerate = false,
@@ -135,24 +146,49 @@ export function MessageActions({
 
       const previous = feedback;
       // Toggling the active vote clears it; a different vote replaces it
-      // (Req 14.5, 14.6) — the reducer's result IS the value we persist.
+      // (Req 14.5, 14.6) — the reducer's result IS the displayed value.
       const next = feedbackReducer(previous, { kind: "activate", value });
 
       // Optimistically reflect the new displayed state, clearing any prior error.
       setFeedback(next);
       setFeedbackError(false);
 
+      // Toggle-off (next === null): the feedback route body only accepts
+      // "up"/"down", so there is no valid "clear" value to send. Reflect the
+      // cleared state locally WITHOUT a network call; the persisted attribute
+      // stays as-is server-side (documented behavior for this task).
+      if (next === null) {
+        return;
+      }
+
+      // Persist the chosen up/down vote via the feedback ROUTE — addressed by the
+      // conversation id and the URL-encoded `MSG#…` sort key. Never Postgres,
+      // never DynamoDB directly (Req 14.2, 14.5). Optimistic; rolls back on
+      // failure (Req 14.7).
       startSaving(async () => {
-        const result = await setMessageFeedback(messageId, next);
-        if (!result.ok) {
-          // Persist failed: retain the previously stored state and surface a
-          // subtle error (Req 14.7).
+        try {
+          const res = await fetch(
+            `/api/conversations/${encodeURIComponent(
+              conversationId,
+            )}/messages/${encodeURIComponent(messageId)}/feedback`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ feedback: next }),
+            },
+          );
+          if (!res.ok) {
+            throw new Error(`Feedback persist failed: ${res.status}`);
+          }
+        } catch {
+          // Persist failed: roll back to the previously stored state and surface
+          // a subtle error (Req 14.7).
           setFeedback(previous);
           setFeedbackError(true);
         }
       });
     },
-    [feedback, isSaving, messageId],
+    [conversationId, feedback, isSaving, messageId],
   );
 
   const copyIcon =

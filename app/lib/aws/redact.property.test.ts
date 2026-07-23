@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest";
 import * as fc from "fast-check";
-import { redactForBrowser } from "./sse";
+import { redactForBrowser, type ChartSpec } from "./sse";
+import {
+  buildConversationItem,
+  buildMessageItem,
+  type ConversationItemInput,
+  type MessageItemInput,
+} from "@/lib/history/items";
 
 /**
  * The secret-key set mirrored from the implementation (`SECRET_KEYS` in
@@ -125,6 +131,106 @@ describe("redactForBrowser property", () => {
         // 3. Idempotence.
         expect(JSON.stringify(redactForBrowser(r))).toBe(JSON.stringify(r));
       }),
+    );
+  });
+});
+
+/**
+ * A small blob of one-or-more secret-named keys mapped to arbitrary leaf values.
+ * Spread into nested elements (activity/report/chart) and onto the top-level
+ * builder inputs (via casts) so the builders receive DELIBERATELY-planted secret
+ * fields at multiple positions.
+ */
+const secretLeaf = fc.oneof(fc.string(), fc.integer(), fc.boolean(), fc.constant(null));
+const secretBlob = fc.dictionary(fc.constantFrom(...SECRET_KEY_SAMPLES), secretLeaf, {
+  minKeys: 1,
+  maxKeys: 4,
+});
+
+/** A valid ChartSpec whose object additionally carries planted secret keys. */
+const chartWithSecrets = fc
+  .record({
+    id: fc.string(),
+    chart_type: fc.constantFrom("bar", "hbar", "line", "pie") as fc.Arbitrary<
+      ChartSpec["chart_type"]
+    >,
+    title: fc.string(),
+    currency: fc.string(),
+    labels: fc.array(fc.string(), { maxLength: 3 }),
+    values: fc.array(fc.integer(), { maxLength: 3 }),
+  })
+  .chain((spec) => secretBlob.map((blob) => ({ ...spec, ...blob }) as ChartSpec));
+
+/** A report element `{ key }` that additionally carries planted secret keys. */
+const reportWithSecrets = fc
+  .record({ key: fc.string() })
+  .chain((r) => secretBlob.map((blob) => ({ ...r, ...blob }) as { key: string }));
+
+/** An activity element `{ label, status }` that additionally carries planted secret keys. */
+const activityWithSecrets = fc
+  .record({ label: fc.string(), status: fc.string() })
+  .chain((a) =>
+    secretBlob.map((blob) => ({ ...a, ...blob }) as { label: string; status: string }),
+  );
+
+/** Conversation builder input with planted secret keys spread onto the top level. */
+const conversationInputWithSecrets = fc
+  .record({
+    conversationId: fc.string(),
+    title: fc.string(),
+    titleSource: fc.constantFrom("pending", "ai", "user") as fc.Arbitrary<
+      ConversationItemInput["titleSource"]
+    >,
+    accountId: fc.string(),
+    createdAt: fc.string(),
+    updatedAt: fc.string(),
+    messageCount: fc.nat(),
+  })
+  .chain((base) => secretBlob.map((blob) => ({ ...base, ...blob }) as ConversationItemInput));
+
+/** Message builder input with planted secret keys nested throughout + on the top level. */
+const messageInputWithSecrets = fc
+  .record({
+    conversationId: fc.string(),
+    userId: fc.string(),
+    role: fc.constantFrom("user", "assistant") as fc.Arbitrary<MessageItemInput["role"]>,
+    content: fc.string(),
+    charts: fc.array(chartWithSecrets, { maxLength: 3 }),
+    reports: fc.array(reportWithSecrets, { maxLength: 3 }),
+    activity: fc.option(fc.array(activityWithSecrets, { maxLength: 3 }), { nil: undefined }),
+    feedback: fc.option(fc.constantFrom("up", "down"), { nil: undefined }) as fc.Arbitrary<
+      MessageItemInput["feedback"]
+    >,
+    createdAt: fc.string(),
+  })
+  .chain((base) => secretBlob.map((blob) => ({ ...base, ...blob }) as MessageItemInput));
+
+describe("history item builders redaction property", () => {
+  it("never emits a secret-named key anywhere in a built conversation or message item", () => {
+    // Feature: cloud-bill-analyst-web-iteration-2, Property 12: Secret fields never appear in stored or browser-bound data
+    fc.assert(
+      fc.property(
+        fc.string(),
+        conversationInputWithSecrets,
+        messageInputWithSecrets,
+        (userId, convInput, msgInput) => {
+          const convItem = buildConversationItem(userId, convInput);
+          const msgItem = buildMessageItem(msgInput);
+
+          const convKeys: string[] = [];
+          collectKeys(convItem, convKeys);
+          for (const key of convKeys) {
+            expect(SECRET_KEYS_LOWER.has(key.toLowerCase())).toBe(false);
+          }
+
+          const msgKeys: string[] = [];
+          collectKeys(msgItem, msgKeys);
+          for (const key of msgKeys) {
+            expect(SECRET_KEYS_LOWER.has(key.toLowerCase())).toBe(false);
+          }
+        },
+      ),
+      { numRuns: 100 },
     );
   });
 });

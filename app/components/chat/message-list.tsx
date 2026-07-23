@@ -15,6 +15,7 @@ import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { cn } from "@/lib/utils";
 
 import { AssistantMarkdown } from "./assistant-markdown";
+import { ChartInline } from "./chart-inline";
 import type { ChatMessage } from "./types";
 
 /**
@@ -45,6 +46,12 @@ export interface MessageListProps {
   isStreaming?: boolean;
   /** Activity timeline attached to the in-progress assistant turn (Req 9). */
   activitySlot?: ReactNode;
+  /**
+   * Inline charts for the in-progress assistant turn, built from `state.charts`
+   * in received order. Rendered under the streaming markdown, before the
+   * trailing slot (Req 4.1, 4.10).
+   */
+  chartsSlot?: ReactNode;
   /** Extra content under the in-progress turn (report cards, anomaly callouts). */
   trailingSlot?: ReactNode;
   /**
@@ -73,10 +80,12 @@ function UserTurn({ content, anchor }: { content: string; anchor: boolean }) {
 function AssistantTurn({
   content,
   activitySlot,
+  chartsSlot,
   trailingSlot,
 }: {
   content: string;
   activitySlot?: ReactNode;
+  chartsSlot?: ReactNode;
   trailingSlot?: ReactNode;
 }) {
   return (
@@ -85,6 +94,7 @@ function AssistantTurn({
         <MessageContent className="gap-3">
           {activitySlot}
           {content.length > 0 ? <AssistantMarkdown content={content} /> : null}
+          {chartsSlot}
           {trailingSlot}
         </MessageContent>
       </Message>
@@ -97,16 +107,18 @@ export function MessageList({
   streamingText = "",
   isStreaming = false,
   activitySlot,
+  chartsSlot,
   trailingSlot,
   renderAssistantActions,
   className,
 }: MessageListProps) {
   // Render the in-progress assistant row when a turn is active or when there is
-  // anything to attach to it (streaming text, the timeline, or trailing cards).
+  // anything to attach to it (streaming text, the timeline, charts, or cards).
   const showInProgress =
     isStreaming ||
     streamingText.length > 0 ||
     activitySlot !== undefined ||
+    chartsSlot !== undefined ||
     trailingSlot !== undefined;
 
   return (
@@ -122,6 +134,9 @@ export function MessageList({
                   <Message align="start">
                     <MessageContent className="gap-2">
                       <AssistantMarkdown content={message.content} />
+                      {message.charts?.map((spec) => (
+                        <ChartInline key={spec.id} spec={spec} />
+                      ))}
                       {renderAssistantActions?.(message, index)}
                     </MessageContent>
                   </Message>
@@ -133,6 +148,7 @@ export function MessageList({
               <AssistantTurn
                 content={streamingText}
                 activitySlot={activitySlot}
+                chartsSlot={chartsSlot}
                 trailingSlot={trailingSlot}
               />
             ) : null}

@@ -16,14 +16,34 @@
  *    before it is serialized to the browser (Req 4.5, 4.6, 5.9, 7.4, 18.2).
  */
 
+/**
+ * Structured data for an inline, client-rendered chart (Req 2.1–2.5).
+ *
+ * Carried by the `chart` SSE event. The browser renders this live with a
+ * charting library (no image, no S3, no presign). `labels` and `values` are
+ * parallel arrays of equal length: `values[i]` is the magnitude for `labels[i]`.
+ */
+export interface ChartSpec {
+  id: string;
+  chart_type: "bar" | "hbar" | "line" | "pie";
+  title: string;
+  currency: string;
+  labels: string[];
+  values: number[];
+}
+
 /** The known event vocabulary forwarded to the browser (Req 7.7). */
 export type SseEvent =
   | { type: "delta"; text: string }
   | { type: "tool"; phase: "start"; id: string; name: string; label: string; status: string }
   | { type: "tool"; phase: "end"; id: string; name: string }
+  | { type: "chart"; spec: ChartSpec }
   | { type: "report_file"; key: string; bucket: string }
   | { type: "error"; message: string }
   | { type: "done" };
+
+/** The chart types accepted in a `ChartSpec` (Req 2.2). */
+const CHART_TYPES: ReadonlySet<string> = new Set(["bar", "hbar", "line", "pie"]);
 
 /** The SSE event-block delimiter (a blank line between events). */
 const EVENT_DELIMITER = "\n\n";
@@ -92,6 +112,14 @@ function isString(value: unknown): value is string {
   return typeof value === "string";
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isString);
+}
+
+function isNumberArray(value: unknown): value is number[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "number");
+}
+
 /**
  * Narrow an arbitrary parsed value to a well-typed `SseEvent`, or return `null`
  * for any unknown type or malformed shape (Req 7.7).
@@ -101,6 +129,9 @@ function isString(value: unknown): value is string {
  *  - `delta`       — string `text`
  *  - `tool`/start  — `phase === "start"` + string `id`, `name`, `label`, `status`
  *  - `tool`/end    — `phase === "end"`   + string `id`, `name`
+ *  - `chart`       — object `spec` with `chart_type ∈ {bar,hbar,line,pie}`,
+ *                    string-array `labels`, number-array `values`, and
+ *                    `labels.length === values.length`
  *  - `report_file` — string `key`, `bucket`
  *  - `error`       — string `message`
  *  - `done`        — just the type
@@ -133,6 +164,26 @@ export function toKnownEvent(raw: unknown): SseEvent | null {
         return null;
       }
       return null;
+    }
+
+    case "chart": {
+      const spec = raw.spec;
+      if (!isRecord(spec)) return null;
+      if (!isString(spec.chart_type) || !CHART_TYPES.has(spec.chart_type)) return null;
+      if (!isString(spec.id) || !isString(spec.title) || !isString(spec.currency)) return null;
+      if (!isStringArray(spec.labels) || !isNumberArray(spec.values)) return null;
+      if (spec.labels.length !== spec.values.length) return null;
+      return {
+        type: "chart",
+        spec: {
+          id: spec.id,
+          chart_type: spec.chart_type as ChartSpec["chart_type"],
+          title: spec.title,
+          currency: spec.currency,
+          labels: spec.labels,
+          values: spec.values,
+        },
+      };
     }
 
     case "report_file":

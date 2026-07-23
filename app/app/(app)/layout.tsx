@@ -1,12 +1,13 @@
 import { redirect } from "next/navigation";
 
 import { AppShell } from "@/components/app-shell/sidebar";
+import type { ConversationListItem } from "@/hooks/useConversations";
 import {
   getActiveAccount,
   listConnectedAccounts,
 } from "@/lib/actions/accounts";
-import { listThreads } from "@/lib/actions/threads";
 import { auth } from "@/lib/auth";
+import { listConversations } from "@/lib/history/conversations";
 
 /**
  * Guarded authenticated shell layout for the `(app)` route group (task 17.2;
@@ -16,7 +17,7 @@ import { auth } from "@/lib/auth";
  *  - Guards the group: any request without a valid authenticated session is
  *    redirected to `/login` before any data is read (Req 2.4).
  *  - Loads the browser-safe shell data server-side — the user's connected
- *    accounts, the active-account selection, and the user's OWN threads
+ *    accounts, the active-account selection, and the user's OWN conversations
  *    (Req 8.9) — passing only projections that exclude secrets and the runtime
  *    session id.
  *  - Renders the persistent {@link AppShell} (sidebar + content) around every
@@ -25,9 +26,10 @@ import { auth } from "@/lib/auth";
  *    (wired to the `logout` server action — Req 2.5).
  *
  * Secrets never reach the client: `listConnectedAccounts`/`getActiveAccount`
- * return {@link ConnectedAccountView}s and `listThreads` returns
- * {@link ThreadView}s, none of which carry `role_arn`, the External_Id, or the
- * `session_id`.
+ * return {@link ConnectedAccountView}s and the DynamoDB `listConversations`
+ * records are projected to browser-safe {@link ConversationListItem}s (the
+ * server-only `sessionId` is dropped), none of which carry `role_arn`, the
+ * External_Id, or the runtime session id.
  */
 export default async function AppLayout({
   children,
@@ -38,18 +40,32 @@ export default async function AppLayout({
     redirect("/login");
   }
 
-  const [accounts, active, threads] = await Promise.all([
+  const [accounts, active, conversations] = await Promise.all([
     listConnectedAccounts(),
     getActiveAccount(),
-    listThreads(),
+    listConversations(userId),
   ]);
+
+  // Project the DynamoDB conversation records into browser-safe list items,
+  // dropping the server-only `sessionId` before it can reach the client.
+  const initialConversations: ConversationListItem[] = conversations.map(
+    (conversation) => ({
+      conversationId: conversation.conversationId,
+      title: conversation.title,
+      titleSource: conversation.titleSource,
+      accountId: conversation.accountId,
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+      messageCount: conversation.messageCount,
+    }),
+  );
 
   return (
     <AppShell
       userEmail={session?.user?.email ?? null}
       accounts={accounts}
       activeId={active?.id ?? null}
-      threads={threads}
+      initialConversations={initialConversations}
     >
       {children}
     </AppShell>

@@ -28,6 +28,19 @@ analysis and shareable reports without building dashboards.
 - **Multiple connected accounts** (account switcher) and **multiple chat
   threads** (saved history).
 
+## Iteration 2 — persistence, titles & inline charts (current pass)
+- **Persisted chat history** — conversations and their messages are saved to
+  **DynamoDB** (NoSQL) and reload across sessions/devices. (Auth + connected
+  accounts stay in Postgres.)
+- **Inline charts in chat** — when the agent renders a chart it now streams a
+  `chart` event; the chat shows the chart **as an inline image**, not just text.
+- **Conversation titles** — a new conversation is titled by **AI** (a short
+  summary of the first user prompt, kept brief) and is **user-editable** (rename)
+  from the sidebar; a user-set title is never overwritten by the AI.
+- **Snappy conversation list** — creating a conversation updates the sidebar
+  **without a page reload** (optimistic insert + revalidate; the "New" control
+  returns to idle immediately, never stuck spinning).
+
 ## Future (explicitly out of MVP)
 Scheduled monthly report email · budget-threshold alerts · multi-account rollup
 dashboard · shared/org workspaces.

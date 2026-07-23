@@ -9,7 +9,7 @@
  * (no React, no fetch, no I/O). The reducer and its state types stay as
  * top-level, framework-free exports so Vitest can import them directly.
  *
- * The network wiring lives in the `useAgentStream(threadId)` hook at the bottom
+ * The network wiring lives in the `useAgentStream(conversationId)` hook at the bottom
  * of this file (task 14.1): it POSTs to `/api/chat`, reads the SSE response body
  * with a `ReadableStream` reader + `TextDecoder`, splits `data:` frames with a
  * small CLIENT-SAFE parser (never importing the server-only relay internals),
@@ -22,12 +22,12 @@
  * cloud-bill-analyst-web spec.
  */
 
-import { useCallback, useReducer } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 // Type-only import: erased at compile time, so this pulls no server-side
 // runtime into the client bundle. The browser trusts the relay's already
 // redacted + filtered event vocabulary.
-import type { SseEvent } from "@/lib/aws/sse";
+import type { ChartSpec, SseEvent } from "@/lib/aws/sse";
 
 /** A single step in the live activity timeline (one `tool` event stream). */
 export interface ActivityStep {
@@ -52,6 +52,11 @@ export interface StreamState {
    * marker alone is not enough.
    */
   reports: ResolvedReport[];
+  /**
+   * Inline chart specs from `chart` events, in received order (Req 3.1–3.5).
+   * Each is rendered live in the browser (no image, no presign).
+   */
+  charts: ChartSpec[];
   phase: "idle" | "streaming" | "done" | "error";
   /** True once a `done` event collapses the timeline into a one-line summary. */
   collapsed: boolean;
@@ -94,6 +99,7 @@ export function createInitialStreamState(): StreamState {
     assistantText: "",
     steps: [],
     reports: [],
+    charts: [],
     phase: "idle",
     collapsed: false,
     liveRegion: "",
@@ -212,6 +218,12 @@ export function streamReducer(s: StreamState, a: StreamAction): StreamState {
       };
     }
 
+    case "chart": {
+      // Append the chart spec in received order; rendered inline client-side
+      // with no image/presign (Req 3.1–3.5).
+      return { ...s, charts: [...s.charts, event.spec] };
+    }
+
     case "done": {
       // Collapse the timeline into an ordered one-line summary (Req 9.6).
       const summary = s.steps.map(stepSummaryText).join(SUMMARY_SEPARATOR);
@@ -321,8 +333,15 @@ function parseClientFrames(buffer: string): { events: SseEvent[]; rest: string }
 export interface UseAgentStream {
   /** The reduced, render-ready state for the current (or last) turn. */
   state: StreamState;
-  /** POST a prompt for `threadId` and stream the reply into `state`. */
+  /** POST a prompt for `conversationId` and stream the reply into `state`. */
   send: (prompt: string) => Promise<void>;
+  /**
+   * True from the instant `send` starts until its stream ends. Bind the
+   * composer's submit + the regenerate control to `!isStreaming` so a thread can
+   * never have two concurrent turns on one `runtimeSessionId` (the UI-level half
+   * of the one-in-flight guard; `send` also enforces it as a hard backstop).
+   */
+  isStreaming: boolean;
 }
 
 /**
@@ -330,7 +349,7 @@ export interface UseAgentStream {
  *
  * `send(prompt)`:
  *  1. Resets state (`{ kind: "reset" }`) so the new turn starts clean.
- *  2. POSTs `{ threadId, prompt }` to `/api/chat`.
+ *  2. POSTs `{ conversationId, prompt }` to `/api/chat`.
  *  3. On a network failure or a non-OK response (e.g. 400/401 pre-invoke
  *     rejection), dispatches an `error` event — surfacing an error state
  *     without throwing uncaught (Req 7.6, 9.7).
@@ -343,114 +362,157 @@ export interface UseAgentStream {
  *     download card can render (Req 11.5). Presign runs in the background and
  *     never blocks delta rendering.
  */
-export function useAgentStream(threadId: string): UseAgentStream {
+export function useAgentStream(conversationId: string): UseAgentStream {
   const [state, dispatch] = useReducer(
     streamReducer,
     undefined,
     createInitialStreamState,
   );
 
+  // One-in-flight guard. `inFlightRef` is a ref (not reducer state) so the lock
+  // takes effect SYNCHRONOUSLY at the top of `send` — before the first SSE event
+  // flips `phase` to "streaming" — closing the window where React StrictMode's
+  // double-invoked effects, a double-submit, or a rapid re-click could start two
+  // overlapping turns on the same thread. Two concurrent invocations share one
+  // `runtimeSessionId`, which corrupts the agent's memory session (mismatched
+  // toolUse/toolResult) and triggers the Bedrock ValidationException.
+  const inFlightRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+
+  // Abort any in-flight turn when the thread changes or the component unmounts;
+  // this also neutralizes StrictMode's mount→unmount→mount double-run in dev.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      inFlightRef.current = false;
+    };
+  }, [conversationId]);
+
   const send = useCallback(
     async (prompt: string): Promise<void> => {
-      // (1) Fresh state for the new turn.
-      dispatch({ kind: "reset" });
-
-      // Presign a report key in the background; attach the URL only on success
-      // so the card renders once ready (Req 11.5). Failures are swallowed — the
-      // card simply stays hidden rather than breaking the turn.
-      const resolveReportUrl = async (key: string): Promise<void> => {
-        try {
-          const res = await fetch(
-            `/api/report-url?key=${encodeURIComponent(key)}`,
-            { method: "GET" },
-          );
-          if (!res.ok) return;
-          const data: unknown = await res.json();
-          if (isRecord(data) && typeof data.url === "string") {
-            dispatch({
-              kind: "reportUrl",
-              key,
-              url: data.url,
-              fileType:
-                typeof data.fileType === "string" ? data.fileType : undefined,
-            });
-          }
-        } catch {
-          // Presign failed — leave the marker unresolved; the card won't render.
-        }
-      };
-
-      const dispatchEvent = (event: SseEvent): void => {
-        dispatch({ kind: "event", event });
-        if (event.type === "report_file") {
-          void resolveReportUrl(event.key);
-        }
-      };
-
-      // (2) Kick off the relay POST.
-      let response: Response;
-      try {
-        response = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ threadId, prompt }),
-        });
-      } catch {
-        dispatchEvent({ type: "error", message: NETWORK_ERROR_MESSAGE });
-        return;
-      }
-
-      // (3) Non-OK (pre-invoke rejection) or missing body → surface an error
-      // without throwing. Prefer the relay's redacted JSON message when present.
-      if (!response.ok || response.body === null) {
-        let message = NETWORK_ERROR_MESSAGE;
-        try {
-          const data: unknown = await response.json();
-          if (isRecord(data) && typeof data.error === "string") {
-            message = data.error;
-          }
-        } catch {
-          // No JSON body — keep the generic message.
-        }
-        dispatchEvent({ type: "error", message });
-        return;
-      }
-
-      // (4) Stream + parse the SSE body.
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+      // (0) One-in-flight guard: ignore overlapping/duplicate sends outright, so
+      // a thread never runs two concurrent turns on one runtimeSessionId.
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      setIsStreaming(true);
+      const controller = new AbortController();
+      abortRef.current = controller;
 
       try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const { events, rest } = parseClientFrames(buffer);
-          buffer = rest;
-          for (const event of events) dispatchEvent(event);
+        // (1) Fresh state for the new turn.
+        dispatch({ kind: "reset" });
+
+        // Presign a report key in the background; attach the URL only on success
+        // so the card renders once ready (Req 11.5). Failures are swallowed — the
+        // card simply stays hidden rather than breaking the turn.
+        const resolveReportUrl = async (key: string): Promise<void> => {
+          try {
+            const res = await fetch(
+              `/api/report-url?key=${encodeURIComponent(key)}`,
+              { method: "GET", signal: controller.signal },
+            );
+            if (!res.ok) return;
+            const data: unknown = await res.json();
+            if (isRecord(data) && typeof data.url === "string") {
+              dispatch({
+                kind: "reportUrl",
+                key,
+                url: data.url,
+                fileType:
+                  typeof data.fileType === "string" ? data.fileType : undefined,
+              });
+            }
+          } catch {
+            // Presign failed/aborted — leave the marker unresolved; card stays hidden.
+          }
+        };
+
+        const dispatchEvent = (event: SseEvent): void => {
+          dispatch({ kind: "event", event });
+          if (event.type === "report_file") {
+            void resolveReportUrl(event.key);
+          }
+        };
+
+        // (2) Kick off the relay POST.
+        let response: Response;
+        try {
+          response = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ conversationId, prompt }),
+            signal: controller.signal,
+          });
+        } catch {
+          // Intentional cancel (unmount / thread switch) → stay silent; otherwise
+          // surface a redacted network error without throwing (Req 7.6, 9.7).
+          if (!controller.signal.aborted) {
+            dispatchEvent({ type: "error", message: NETWORK_ERROR_MESSAGE });
+          }
+          return;
         }
 
-        // Flush any final buffered bytes and process a trailing frame that may
-        // not be terminated by a blank line.
-        buffer += decoder.decode();
-        if (buffer.length > 0) {
-          const { events } = parseClientFrames(`${buffer}${FRAME_DELIMITER}`);
-          for (const event of events) dispatchEvent(event);
+        // (3) Non-OK (pre-invoke rejection) or missing body → surface an error
+        // without throwing. Prefer the relay's redacted JSON message when present.
+        if (!response.ok || response.body === null) {
+          let message = NETWORK_ERROR_MESSAGE;
+          try {
+            const data: unknown = await response.json();
+            if (isRecord(data) && typeof data.error === "string") {
+              message = data.error;
+            }
+          } catch {
+            // No JSON body — keep the generic message.
+          }
+          dispatchEvent({ type: "error", message });
+          return;
         }
-      } catch {
-        // Mid-stream failure (aborted/network drop): stop spinners with an error.
-        dispatchEvent({ type: "error", message: NETWORK_ERROR_MESSAGE });
+
+        // (4) Stream + parse the SSE body.
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const { events, rest } = parseClientFrames(buffer);
+            buffer = rest;
+            for (const event of events) dispatchEvent(event);
+          }
+
+          // Flush any final buffered bytes and process a trailing frame that may
+          // not be terminated by a blank line.
+          buffer += decoder.decode();
+          if (buffer.length > 0) {
+            const { events } = parseClientFrames(`${buffer}${FRAME_DELIMITER}`);
+            for (const event of events) dispatchEvent(event);
+          }
+        } catch {
+          // Mid-stream drop: stop spinners with an error — unless we aborted on purpose.
+          if (!controller.signal.aborted) {
+            dispatchEvent({ type: "error", message: NETWORK_ERROR_MESSAGE });
+          }
+        } finally {
+          try {
+            reader.releaseLock();
+          } catch {
+            // Reader already released — nothing to do.
+          }
+        }
       } finally {
-        try {
-          reader.releaseLock();
-        } catch {
-          // Reader already released — nothing to do.
-        }
+        // (5) Release the in-flight lock so the next turn can start.
+        inFlightRef.current = false;
+        setIsStreaming(false);
+        if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [threadId],
+    [conversationId],
   );
 
-  return { state, send };
+  return { state, send, isStreaming };
 }

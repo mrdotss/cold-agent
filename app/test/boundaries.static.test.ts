@@ -1,6 +1,6 @@
 // @vitest-environment node
 //
-// Static secret-boundary and environment guards (tasks 19.1).
+// Static secret-boundary and environment guards (tasks 19.1, 14.1).
 //
 // These tests read the repository's source files from disk (Node `fs`) and
 // assert structural invariants that keep secrets on the server and out of the
@@ -12,9 +12,19 @@
 //           `lib/aws/*` and `lib/crypto.ts` imports "server-only".
 //   - 18.3  no hardcoded AgentCore runtime ARN literal anywhere in source
 //           (the ARN must be read from `process.env.CBA_RUNTIME_ARN`).
-//   - 19.2  `.env.example` declares exactly the seven required placeholders,
-//           and each value is a non-secret placeholder.
+//   - 19.2  `.env.example` declares exactly the required placeholders (now nine,
+//           including `CBA_HISTORY_TABLE` + `CBA_TITLE_MODEL_ID`), and each value
+//           is a non-secret placeholder.
 //   - 19.3  `.env` is git-ignored (while `.env.example` remains trackable).
+//   - 5.1   chat-history server-only boundary: the AWS/secret-touching history
+//           modules (`lib/aws/dynamo.ts`, `lib/aws/bedrock.ts`,
+//           `lib/history/conversations.ts`, `lib/history/messages.ts`) import
+//           "server-only"; the pure client-safe helpers (`lib/history/keys.ts`,
+//           `lib/history/items.ts`) do not import "server-only" or `@aws-sdk/*`.
+//   - 13.3  `components/chat/chart-inline.tsx` imports no `@aws-sdk` module and
+//           no "server-only" (it renders from client-safe `ChartSpec` data).
+//   - 7.6, 13.1, 13.2  each new conversations route pins the Node runtime
+//           (`export const runtime = "nodejs"`).
 
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -172,6 +182,9 @@ describe(".env.example placeholders and .env git-ignore (Req 19.2, 19.3)", () =>
     "CBA_RUNTIME_ARN",
     "CBA_RUNTIME_ROLE_ARN",
     "CBA_REPORT_BUCKET",
+    // Iteration 2 (task 1.2): chat-history table + AI title model id.
+    "CBA_HISTORY_TABLE",
+    "CBA_TITLE_MODEL_ID",
   ].sort();
 
   /** Parse `KEY=value` pairs from a dotenv file, ignoring comments/blanks. */
@@ -200,8 +213,20 @@ describe(".env.example placeholders and .env git-ignore (Req 19.2, 19.3)", () =>
   const envExamplePath = path.join(APP_ROOT, ".env.example");
   const envVars = parseDotenv(read(envExamplePath));
 
-  it(".env.example defines exactly the seven required keys", () => {
+  it(".env.example defines exactly the nine required keys", () => {
     expect([...envVars.keys()].sort()).toEqual(REQUIRED_KEYS);
+  });
+
+  it("declares the iteration-2 chat-history keys with non-empty placeholders", () => {
+    // Task 1.2 added these two keys; assert both exist and carry a non-empty
+    // placeholder value (Req 5.1, 12.1, 12.2).
+    for (const key of ["CBA_HISTORY_TABLE", "CBA_TITLE_MODEL_ID"]) {
+      expect(envVars.has(key), `${key} must be declared in .env.example`).toBe(true);
+      expect(
+        (envVars.get(key) ?? "").length,
+        `${key} must have a non-empty placeholder`,
+      ).toBeGreaterThan(0);
+    }
   });
 
   it("every placeholder value is non-empty and non-secret", () => {
@@ -246,5 +271,105 @@ describe(".env.example placeholders and .env git-ignore (Req 19.2, 19.3)", () =>
     expect(keepsExample, ".env.example must stay trackable via a negation rule").toBe(
       true,
     );
+  });
+});
+
+describe("chat-history server-only boundary (Req 5.1, 12.1, 12.2)", () => {
+  // The modules that touch AWS credentials (the DynamoDB document client, the
+  // Bedrock title Converse call) or wrap them (the conversation/message stores)
+  // must be server-only so they can never be pulled into a client bundle.
+  it("the AWS/secret-touching history modules explicitly import server-only", () => {
+    const serverOnlyModules = [
+      path.join(APP_ROOT, "lib", "aws", "dynamo.ts"),
+      path.join(APP_ROOT, "lib", "aws", "bedrock.ts"),
+      path.join(APP_ROOT, "lib", "history", "conversations.ts"),
+      path.join(APP_ROOT, "lib", "history", "messages.ts"),
+    ];
+    for (const file of serverOnlyModules) {
+      const source = read(file);
+      expect(
+        SERVER_ONLY_IMPORT.test(source),
+        `${path.relative(APP_ROOT, file)} must \`import "server-only"\``,
+      ).toBe(true);
+    }
+  });
+
+  it("the pure client-safe history helpers (keys.ts, items.ts) are genuinely client-safe", () => {
+    // These are exempt from server-only ONLY because they are pure: no AWS SDK
+    // and no server-only import. `keys.ts` is a dependency-free key encoder and
+    // `items.ts` assembles items from client-safe helpers (redaction, session-id,
+    // keys) without ever touching `lib/aws/dynamo.ts` or a secret. Verify the
+    // exemption is earned so the same encoding can run on the client (Req 5.1).
+    //
+    // Match an ACTUAL `import "server-only"` STATEMENT (line-anchored), not a
+    // prose mention: `items.ts`'s JSDoc documents that it is "server-SAFE
+    // without `import "server-only"`", and that comment must not trip the guard.
+    const SERVER_ONLY_IMPORT_STATEMENT = /^\s*import\s+["']server-only["']/m;
+    for (const name of ["keys.ts", "items.ts"]) {
+      const source = read(path.join(APP_ROOT, "lib", "history", name));
+      expect(
+        SERVER_ONLY_IMPORT_STATEMENT.test(source),
+        `${name} must not import "server-only"`,
+      ).toBe(false);
+      expect(AWS_SDK_IMPORT.test(source), `${name} must not import @aws-sdk/*`).toBe(
+        false,
+      );
+    }
+  });
+});
+
+describe("inline chart component is client-safe (Req 13.3)", () => {
+  // The inline chart renders from the structured `ChartSpec` the browser already
+  // received on a `chart` SSE event — no S3 object, no presign, no AWS call. It
+  // must therefore import NO `@aws-sdk` module and NO "server-only" module, so it
+  // is safe to ship in the client bundle.
+  it("components/chat/chart-inline.tsx imports no @aws-sdk module and no server-only", () => {
+    const source = read(
+      path.join(APP_ROOT, "components", "chat", "chart-inline.tsx"),
+    );
+    expect(
+      AWS_SDK_IMPORT.test(source),
+      "chart-inline.tsx must not import @aws-sdk/*",
+    ).toBe(false);
+    expect(
+      SERVER_ONLY_IMPORT.test(source),
+      'chart-inline.tsx must not import "server-only"',
+    ).toBe(false);
+  });
+});
+
+describe("chat-history routes run on the Node runtime (Req 7.6, 13.1, 13.2)", () => {
+  // The conversation/message/title routes reach DynamoDB + Bedrock through the
+  // AWS SDK, which is unavailable on edge; each must pin the Node runtime.
+  // Tolerant of quote style (single or double quotes around `nodejs`).
+  const NODE_RUNTIME = /export\s+const\s+runtime\s*=\s*["']nodejs["']/;
+
+  // Build paths with path.join using the literal bracket directory names for the
+  // dynamic `[id]` / `[messageId]` segments.
+  const routeFiles = [
+    path.join(APP_ROOT, "app", "api", "conversations", "route.ts"),
+    path.join(APP_ROOT, "app", "api", "conversations", "[id]", "route.ts"),
+    path.join(APP_ROOT, "app", "api", "conversations", "[id]", "title", "route.ts"),
+    path.join(
+      APP_ROOT,
+      "app",
+      "api",
+      "conversations",
+      "[id]",
+      "messages",
+      "[messageId]",
+      "feedback",
+      "route.ts",
+    ),
+  ];
+
+  it("each new conversations route exports `runtime = \"nodejs\"`", () => {
+    for (const file of routeFiles) {
+      const source = read(file);
+      expect(
+        NODE_RUNTIME.test(source),
+        `${path.relative(APP_ROOT, file)} must \`export const runtime = "nodejs"\``,
+      ).toBe(true);
+    }
   });
 });

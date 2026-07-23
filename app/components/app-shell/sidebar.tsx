@@ -8,22 +8,20 @@ import {
   Cancel01Icon,
   CloudIcon,
   DashboardSquare01Icon,
-  Loading03Icon,
   Logout01Icon,
   Menu01Icon,
-  Message01Icon,
   PlusSignIcon,
 } from "@hugeicons/core-free-icons";
 
 import { AccountSwitcher } from "@/components/accounts/account-switcher";
+import { ConversationList } from "@/components/app-shell/conversation-list";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import type { ConversationListItem } from "@/hooks/useConversations";
 import { setActiveAccount } from "@/lib/actions/accounts";
 import { logout } from "@/lib/actions/login";
-import { createThread } from "@/lib/actions/threads";
 import type { ConnectedAccountView } from "@/lib/db/views";
-import type { ThreadView } from "@/lib/actions/threads";
 import { cn } from "@/lib/utils";
 
 /**
@@ -31,12 +29,13 @@ import { cn } from "@/lib/utils";
  *
  * A persistent editorial sidebar plus the page content area. The server layout
  * that renders this component performs the auth guard and loads the browser-safe
- * data (accounts, active-account id, and the user's own threads); this client
+ * data (accounts, active-account id, and the user's own conversations); this client
  * component owns the interactivity: switching the active account, starting a new
  * chat, sign-out, and the responsive mobile drawer.
  *
  * Only browser-safe views ever reach here — {@link ConnectedAccountView} and
- * {@link ThreadView} both exclude account secrets and the runtime session id.
+ * {@link ConversationListItem} both exclude account secrets and the runtime
+ * session id.
  */
 export interface AppShellProps {
   /** The signed-in user's email, for the sidebar footer identity line. */
@@ -45,8 +44,13 @@ export interface AppShellProps {
   accounts: ConnectedAccountView[];
   /** The active-account id, or `null` when none is selected. */
   activeId: string | null;
-  /** The authenticated user's own threads, newest-first for display (Req 8.9). */
-  threads: ThreadView[];
+  /**
+   * The authenticated user's own conversations, most-recently-updated first, to
+   * seed the sidebar list without an initial fetch flash (Req 8.9). These are
+   * browser-safe items (no `sessionId`); the client {@link ConversationList}
+   * takes over interactivity + optimistic updates from here.
+   */
+  initialConversations: ConversationListItem[];
   children: React.ReactNode;
 }
 
@@ -54,7 +58,7 @@ export function AppShell({
   userEmail,
   accounts,
   activeId,
-  threads,
+  initialConversations,
   children,
 }: AppShellProps) {
   const [mobileOpen, setMobileOpen] = React.useState(false);
@@ -80,14 +84,15 @@ export function AppShell({
   }, [mobileOpen]);
 
   return (
-    <div className="flex min-h-svh flex-col md:flex-row">
-      {/* Persistent sidebar (md and up). */}
-      <aside className="hidden w-72 shrink-0 border-r border-border bg-card md:flex md:flex-col">
+    <div className="flex h-svh flex-col overflow-hidden md:flex-row">
+      {/* Persistent sidebar (md and up). Full viewport height with its own
+          internal scroll so the page body never scrolls it out of view. */}
+      <aside className="hidden w-72 shrink-0 overflow-hidden border-r border-border bg-card md:flex md:flex-col md:h-svh">
         <SidebarBody
           userEmail={userEmail}
           accounts={accounts}
           activeId={activeId}
-          threads={threads}
+          initialConversations={initialConversations}
         />
       </aside>
 
@@ -140,13 +145,13 @@ export function AppShell({
               userEmail={userEmail}
               accounts={accounts}
               activeId={activeId}
-              threads={threads}
+              initialConversations={initialConversations}
             />
           </aside>
         </div>
       ) : null}
 
-      <main className="min-w-0 flex-1">{children}</main>
+      <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>
     </div>
   );
 }
@@ -161,25 +166,36 @@ const NAV_ITEMS = [
  * The shared sidebar content, rendered inside both the persistent desktop
  * sidebar and the mobile drawer. Contains the brand, primary nav, the active
  * account switcher (or a connect-account affordance when there are none —
- * Req 5.4), the new-chat action, the user's thread list (Req 8.9), and the
- * sign-out control (Req 2.5).
+ * Req 5.4), the interactive {@link ConversationList} (optimistic create +
+ * editable AI titles — Req 1, Req 11), and the sign-out control (Req 2.5).
+ *
+ * The conversation list is a self-contained client component; this body wires
+ * its navigation (client-side `router.push` to `/chat/<conversationId>` with NO
+ * full reload — Req 1.4) and surfaces its errors into the existing `notice`.
  */
 function SidebarBody({
   userEmail,
   accounts,
   activeId,
-  threads,
+  initialConversations,
 }: Omit<AppShellProps, "children">) {
   const router = useRouter();
   const pathname = usePathname();
 
   const [switching, setSwitching] = React.useState(false);
-  const [creating, setCreating] = React.useState(false);
   const [notice, setNotice] = React.useState<string | null>(null);
 
   const hasAccounts = accounts.length > 0;
   // The account a new chat will be pinned to: the active one, else the first.
   const newChatAccountId = activeId ?? accounts[0]?.id ?? null;
+
+  // The currently open conversation id, parsed from a `/chat/<id>` pathname, so
+  // the list can render its active-row left border. `undefined` off the chat
+  // routes.
+  const activeConversationId = React.useMemo(() => {
+    const match = /^\/chat\/([^/]+)/.exec(pathname);
+    return match ? decodeURIComponent(match[1]) : undefined;
+  }, [pathname]);
 
   const handleSelectAccount = React.useCallback(
     (accountId: string) => {
@@ -195,21 +211,15 @@ function SidebarBody({
     [router],
   );
 
-  const handleNewChat = React.useCallback(() => {
-    if (newChatAccountId === null) return;
-    setCreating(true);
-    setNotice(null);
-    void (async () => {
-      const result = await createThread({ connectedAccountId: newChatAccountId });
-      if (result.ok) {
-        router.push(`/chat/${result.thread.id}`);
-        router.refresh();
-      } else {
-        setNotice(result.message);
-        setCreating(false);
-      }
-    })();
-  }, [newChatAccountId, router]);
+  // On a successful optimistic create, navigate to the new conversation WITHOUT
+  // a full reload (Req 1.4). The list already updated optimistically via the
+  // hook, so a `router.push` is enough — no `router.refresh()`.
+  const handleConversationCreated = React.useCallback(
+    (conversationId: string) => {
+      router.push(`/chat/${conversationId}`);
+    },
+    [router],
+  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-6 p-4">
@@ -270,66 +280,17 @@ function SidebarBody({
         )}
       </section>
 
-      {/* Conversations (Req 8.9) */}
-      <section className="flex min-h-0 flex-1 flex-col gap-2">
-        <div className="flex items-center justify-between px-1">
-          <span className="text-[0.65rem] font-semibold tracking-[0.2em] text-muted-foreground uppercase">
-            Conversations
-          </span>
-          <button
-            type="button"
-            onClick={handleNewChat}
-            disabled={newChatAccountId === null || creating}
-            title={
-              newChatAccountId === null
-                ? "Connect an account to start a chat"
-                : "Start a new chat"
-            }
-            aria-label="New chat"
-            className="inline-flex items-center gap-1 text-[0.65rem] font-semibold tracking-widest text-muted-foreground uppercase transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 motion-reduce:transition-none"
-          >
-            <HugeiconsIcon
-              icon={creating ? Loading03Icon : PlusSignIcon}
-              className={cn("size-3.5", creating && "animate-spin motion-reduce:animate-none")}
-            />
-            New
-          </button>
-        </div>
-
-        <nav aria-label="Conversations" className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto">
-          {threads.length > 0 ? (
-            threads.map((thread) => {
-              const href = `/chat/${thread.id}`;
-              const active = pathname === href;
-              return (
-                <Link
-                  key={thread.id}
-                  href={href}
-                  aria-current={active ? "page" : undefined}
-                  className={cn(
-                    "flex items-center gap-2 border-l-2 px-3 py-2 text-sm transition-colors duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
-                    active
-                      ? "border-primary bg-muted text-foreground"
-                      : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-                  )}
-                >
-                  <HugeiconsIcon
-                    icon={Message01Icon}
-                    className="size-4 shrink-0 text-muted-foreground"
-                  />
-                  <span className="truncate">
-                    {thread.title ?? "New conversation"}
-                  </span>
-                </Link>
-              );
-            })
-          ) : (
-            <p className="px-3 py-2 text-sm text-muted-foreground">
-              No conversations yet.
-            </p>
-          )}
-        </nav>
-      </section>
+      {/* Conversations (Req 1, 8.9, 10, 11) — the interactive client list owns
+          the optimistic "New" control, inline rename, and pending-title
+          firing; this body wires navigation + error surfacing. */}
+      <ConversationList
+        accountCount={accounts.length}
+        newChatAccountId={newChatAccountId}
+        activeConversationId={activeConversationId}
+        initialConversations={initialConversations}
+        onCreated={handleConversationCreated}
+        onError={setNotice}
+      />
 
       {notice ? (
         <p className="px-1 text-xs text-destructive" role="status">

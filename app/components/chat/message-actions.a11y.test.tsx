@@ -1,15 +1,10 @@
 import "@/test/dom-polyfills";
 import "@testing-library/jest-dom/vitest";
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { axe } from "vitest-axe";
-
-// The feedback server action is irrelevant to a11y wiring — stub it.
-vi.mock("@/lib/actions/feedback", () => ({
-  setMessageFeedback: vi.fn().mockResolvedValue({ ok: true, value: "up" }),
-}));
 
 import { expectNoAxeViolations } from "@/test/axe";
 import { MessageActions } from "./message-actions";
@@ -36,6 +31,7 @@ describe("MessageActions keyboard + accessible names (Req 20.5)", () => {
 
     render(
       <MessageActions
+        conversationId="c1"
         messageId="m1"
         content="Total spend: $120"
         canRegenerate
@@ -69,7 +65,14 @@ describe("MessageActions keyboard + accessible names (Req 20.5)", () => {
   it("activates the focused vote via the keyboard (Space/Enter) (Req 20.5)", async () => {
     const user = userEvent.setup();
 
-    render(<MessageActions messageId="m1" content="answer" />);
+    // A chosen vote persists through the feedback route via `fetch`; stub it ok
+    // so the optimistic activation is retained (persistence itself is covered in
+    // message-actions.feedback.test.tsx).
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+
+    render(
+      <MessageActions conversationId="c1" messageId="m1" content="answer" />,
+    );
 
     const up = screen.getByRole("button", { name: "Thumbs up" });
     up.focus();
@@ -89,6 +92,7 @@ describe("MessageActions axe (Req 20.6 — roles/names/ARIA; contrast noted)", (
   it("has no axe violations", async () => {
     const { container } = render(
       <MessageActions
+        conversationId="c1"
         messageId="m1"
         content="answer"
         canRegenerate

@@ -11,34 +11,48 @@ import {
   parseSseChunk,
   redactForBrowser,
   toKnownEvent,
+  type ChartSpec,
   type SseEvent,
 } from "@/lib/aws/sse";
 import { decryptSecret } from "@/lib/crypto";
 import { getDb } from "@/lib/db";
-import { connectedAccounts, threads } from "@/lib/db/schema";
+import { connectedAccounts } from "@/lib/db/schema";
+import { getConversationOwned } from "@/lib/history/conversations";
+import { appendMessage } from "@/lib/history/messages";
 import { resolveCurrencyAndTimezone } from "@/lib/invocation-context";
 
 /**
- * Chat SSE relay route (Req 6.5, 7.1–7.11, 18.4).
+ * Chat SSE relay route (Req 6.5, 7.1–7.11, 9.1–9.7, 18.4).
  *
- * `POST /api/chat` invokes the deployed AgentCore runtime for a chat thread and
+ * `POST /api/chat` invokes the deployed AgentCore runtime for a conversation and
  * relays its Server-Sent-Events stream to the browser. It runs on the **Node
  * runtime** (Req 7.2) because it reaches Postgres (`pg`), decrypts the pinned
- * account's External_Id with Node crypto, and streams the AWS SDK response —
- * none of which is available on edge.
+ * account's External_Id with Node crypto, streams the AWS SDK response, and
+ * persists chat history to DynamoDB — none of which is available on edge.
  *
- * ## Secret boundary
- * `role_arn` and the decrypted External_Id are resolved SERVER-SIDE from the
- * thread's pinned Connected_Account (Req 7.4) and passed only into the
- * invocation `context`. Every byte written to the browser is first passed
- * through {@link redactForBrowser}, so no relayed event can carry `role_arn`,
- * External_Id, or AWS credentials.
+ * ## Ownership + secret boundary
+ * The conversation is loaded from DynamoDB with an ownership gate
+ * ({@link getConversationOwned}); a missing/not-owned conversation is a 404 that
+ * leaks nothing (Req 8.7). Its `accountId` selects the pinned Connected_Account,
+ * whose `role_arn` and decrypted External_Id are resolved SERVER-SIDE (Req 7.4)
+ * and passed only into the invocation `context`. Every byte written to the
+ * browser is first passed through {@link redactForBrowser}, so no relayed event
+ * can carry `role_arn`, External_Id, or AWS credentials.
+ *
+ * ## Persistence (Req 9.1–9.7)
+ * The USER message is persisted BEFORE the runtime is invoked (Req 9.1). While
+ * relaying, the server ALSO accumulates the assistant's text, charts, reports,
+ * and an activity summary; the ASSISTANT message is persisted in the stream's
+ * `start()` finally path (Req 9.2, 9.3) so a turn whose browser navigated away
+ * (its fetch aborted → stream `cancel()`) is still saved. The empty-text turn is
+ * skipped (Req 9.7).
  *
  * ## Two failure regimes
  *  - **Pre-invoke rejections** return a normal JSON error status and NEVER open
- *    the SSE stream: no authenticated session → 401 (Req 7.10); thread not found
- *    / not owned → 404 (Req 8.7); no pinned Connected_Account (or zero accounts)
- *    → 400 (Req 6.5, 7.11), leaving the composer's text untouched.
+ *    the SSE stream: no authenticated session → 401 (Req 7.10); conversation not
+ *    found / not owned → 404 (Req 8.7); no pinned Connected_Account (or zero
+ *    accounts) → 400 (Req 6.5, 7.11), leaving the composer's text untouched;
+ *    External_Id decrypt failure → redacted 500.
  *  - **Invoke-start failure** happens once the stream has opened: exactly one
  *    redacted `error` event is emitted, then the stream closes (Req 7.8).
  */
@@ -49,7 +63,7 @@ const INACTIVITY_TIMEOUT_MS = 120_000;
 
 /** Request body accepted by `POST /api/chat`. */
 const chatBodySchema = z.object({
-  threadId: z.string().min(1),
+  conversationId: z.string().min(1),
   prompt: z.string().min(1),
 });
 
@@ -90,32 +104,31 @@ export async function POST(request: Request): Promise<Response> {
   const parsed = chatBodySchema.safeParse(rawBody);
   if (!parsed.success) {
     return NextResponse.json(
-      { error: "A thread id and a non-empty message are required." },
+      { error: "A conversation id and a non-empty message are required." },
       { status: 400 },
     );
   }
-  const { threadId, prompt } = parsed.data;
+  const { conversationId, prompt } = parsed.data;
 
-  const db = getDb();
-
-  // Load the thread with an OWNER check (Req 8.7). A non-owned/missing thread is
-  // indistinguishable — its session id is never exposed.
-  const [thread] = await db
-    .select({
-      sessionId: threads.sessionId,
-      connectedAccountId: threads.connectedAccountId,
-    })
-    .from(threads)
-    .where(and(eq(threads.id, threadId), eq(threads.userId, userId)))
-    .limit(1);
-
-  if (thread === undefined) {
+  // Load the conversation from DynamoDB with an OWNER check (Req 8.7). A
+  // non-owned/missing conversation is indistinguishable — its session id and
+  // pinned account are never exposed.
+  const conversation = await getConversationOwned(userId, conversationId);
+  if (conversation === null) {
     return NextResponse.json({ error: "Chat not found." }, { status: 404 });
   }
 
-  // Resolve the pinned Connected_Account server-side (Req 7.4, 7.11). If it is
-  // missing (or the user has zero accounts) reject with a connect-account error
-  // WITHOUT invoking; the client keeps the composed text (Req 6.5).
+  // The runtime session id is the value derived + stored at creation
+  // (sessionIdForThread(conversationId)); use it verbatim, never regenerate (Req 7.9).
+  const runtimeSessionId = conversation.sessionId;
+  const accountId = conversation.accountId;
+
+  const db = getDb();
+
+  // Resolve the pinned Connected_Account server-side BY the conversation's
+  // accountId (Req 7.4, 7.11). If it is missing (or the user has zero accounts)
+  // reject with a connect-account error WITHOUT invoking; the client keeps the
+  // composed text (Req 6.5).
   const [account] = await db
     .select({
       roleArn: connectedAccounts.roleArn,
@@ -127,7 +140,7 @@ export async function POST(request: Request): Promise<Response> {
     .from(connectedAccounts)
     .where(
       and(
-        eq(connectedAccounts.id, thread.connectedAccountId),
+        eq(connectedAccounts.id, accountId),
         eq(connectedAccounts.userId, userId),
       ),
     )
@@ -164,9 +177,16 @@ export async function POST(request: Request): Promise<Response> {
     timezone, // Req 7.5
   };
 
-  // Stable, per-thread runtime session id (Req 7.9). Use the thread's persisted
-  // value verbatim — never regenerate.
-  const runtimeSessionId = thread.sessionId;
+  // Persist the USER message BEFORE invoking the runtime (Req 9.1). Ownership was
+  // gated above; appendMessage re-checks it internally, which is fine.
+  await appendMessage(userId, conversationId, {
+    userId,
+    role: "user",
+    content: prompt,
+    charts: [],
+    reports: [],
+    createdAt: new Date().toISOString(),
+  });
 
   const encoder = new TextEncoder();
 
@@ -180,6 +200,14 @@ export async function POST(request: Request): Promise<Response> {
   // Guards the single invoke-start error event (Req 7.8) and prevents any
   // duplicate terminal error.
   let errorEmitted = false;
+
+  // Server-side accumulation for the persisted ASSISTANT message (Req 9.2, 9.3).
+  // Captured in this closure so the stream's finally path can persist even when
+  // the client disconnected (its fetch aborted → stream `cancel()`).
+  let assistantText = "";
+  const charts: ChartSpec[] = [];
+  const reports: { key: string }[] = [];
+  const activity: { label: string; status: string }[] = [];
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -239,6 +267,27 @@ export async function POST(request: Request): Promise<Response> {
             const known = toKnownEvent(raw);
             if (known === null) continue; // Req 7.7: drop unknown events, keep going.
 
+            // Accumulate server-side for the persisted assistant message
+            // (Req 9.2, 9.3) — independent of whether the client stays connected.
+            switch (known.type) {
+              case "delta":
+                assistantText += known.text;
+                break;
+              case "chart":
+                charts.push(known.spec);
+                break;
+              case "report_file":
+                reports.push({ key: known.key });
+                break;
+              case "tool":
+                if (known.phase === "start") {
+                  activity.push({ label: known.label, status: known.status });
+                }
+                break;
+              default:
+                break;
+            }
+
             if (known.type === "error") errorEmitted = true;
             controller.enqueue(frame(known)); // Req 7.6: forward in received order.
 
@@ -266,11 +315,35 @@ export async function POST(request: Request): Promise<Response> {
         } catch {
           // Ignore teardown errors.
         }
+
+        // Persist the ASSISTANT message here — NOT gated on the client remaining
+        // connected — so a turn whose browser navigated away is still saved
+        // (Req 9.2, 9.3). Skip when no text was produced (turn aborted before any
+        // delta, Req 9.7). Wrapped so a persistence failure never throws into the
+        // stream teardown.
+        if (assistantText.length > 0) {
+          try {
+            await appendMessage(userId, conversationId, {
+              userId,
+              role: "assistant",
+              content: assistantText,
+              charts,
+              reports,
+              activity,
+              createdAt: new Date().toISOString(),
+            });
+          } catch {
+            // Ignore persistence errors — never break stream teardown (Req 9.3).
+          }
+        }
+
         controller.close();
       }
     },
     async cancel() {
-      // Client disconnected: stop the loop and release the upstream stream.
+      // Client disconnected: stop the loop and release the upstream stream. The
+      // `start()` finally still runs and persists the accumulated assistant
+      // message (disconnect-safe, Req 9.2, 9.3).
       cancelled = true;
       try {
         await upstreamIterator?.return?.();

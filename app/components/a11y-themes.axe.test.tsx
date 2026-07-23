@@ -4,13 +4,9 @@ import "@testing-library/jest-dom/vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
 import { axe } from "vitest-axe";
-
-vi.mock("@/lib/actions/feedback", () => ({
-  setMessageFeedback: vi.fn().mockResolvedValue({ ok: true, value: "up" }),
-}));
 
 import { expectNoAxeViolations } from "@/test/axe";
 import { Composer } from "@/components/chat/composer";
@@ -65,6 +61,7 @@ function Harness() {
 
       <main>
         <MessageActions
+          conversationId="c1"
           messageId="m1"
           content="Total spend: $120"
           canRegenerate
